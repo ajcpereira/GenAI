@@ -1,0 +1,2 @@
+class MCPAdapter:
+    pass

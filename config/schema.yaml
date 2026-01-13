@@ -1,0 +1,2 @@
+type: object
+required: [llm, orchestrator, tools, rag]

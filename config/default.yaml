@@ -1,0 +1,28 @@
+llm:
+  provider: vllm
+  model:
+    name: mistral-7b
+    path: /tmp/models/mistral-7b
+    tokenizer_path: /tmp/models/mistral-7b/tokenizer
+  runtime:
+    endpoint: unix:///tmp/vllm.sock
+    max_context_tokens: 8192
+
+orchestrator:
+  model:
+    name: phi-3-mini
+    path: /tmp/models/phi-3-mini
+  reasoning:
+    allow_rag: true
+    allow_tools: true
+
+tools:
+  enabled: true
+  providers:
+    - name: mcp
+      endpoint: http://localhost:8081
+      allowed_tools:
+        - web.fetch
+
+rag:
+  enabled: false
