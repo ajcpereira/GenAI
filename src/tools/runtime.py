@@ -1,3 +1,1 @@
-class ToolRuntime:
-    def execute(self, tool):
-        raise NotImplementedError
+class ToolRuntime: pass

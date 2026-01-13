@@ -1,21 +1,10 @@
 # GenAI Core – Phase 1
 
-Enterprise-grade, on‑prem, API‑first GenAI core with strict orchestration, config-driven behavior, and extensible architecture.
+Enterprise-grade, on‑prem, API‑first GenAI core.
 
-## Key Guarantees
-- Orchestrator Agent is the sole authority for decisions
-- LLMs are pure runtimes
+Key guarantees:
+- Orchestrator Agent (Phi‑3 Mini) is the single authority
+- LLMs are execution-only runtimes
 - YAML configuration is the single source of truth
-- No implicit tool or RAG execution
-- Contracts are stable and explicit
-
-## Running
-```bash
-pip install -e .
-python src/main.py
-```
-
-## Testing
-```bash
-pytest
-```
+- Hugging Face + vLLM adapters
+- GPU/CPU transparent execution

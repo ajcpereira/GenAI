@@ -1,17 +1,16 @@
 llm:
-  provider: vllm
+  provider: huggingface
   model:
-    name: mistral-7b
-    path: /tmp/models/mistral-7b
-    tokenizer_path: /tmp/models/mistral-7b/tokenizer
+    name: mistral-7b-instruct
+    path: /models/mistral-7b-instruct
   runtime:
-    endpoint: unix:///tmp/vllm.sock
     max_context_tokens: 8192
+    max_new_tokens: 512
 
 orchestrator:
   model:
     name: phi-3-mini
-    path: /tmp/models/phi-3-mini
+    path: /models/phi-3-mini
   reasoning:
     allow_rag: true
     allow_tools: true

@@ -1,2 +1,1 @@
-def authorize(request):
-    return True
+def authorize(req): return True
