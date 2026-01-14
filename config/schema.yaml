@@ -1,2 +1,72 @@
 type: object
 required: [llm, orchestrator, tools, rag]
+properties:
+  llm:
+    type: object
+    required: [provider, model, runtime]
+    properties:
+      provider:
+        type: string
+        enum: [huggingface, vllm]
+      model:
+        type: object
+        required: [name]
+        properties:
+          name: { type: string }
+          path: { type: string }
+      runtime:
+        type: object
+        required: [max_context_tokens, max_new_tokens]
+        properties:
+          endpoint: { type: string }
+          max_context_tokens: { type: integer, minimum: 1 }
+          max_new_tokens: { type: integer, minimum: 1 }
+          temperature: { type: number, minimum: 0 }
+  orchestrator:
+    type: object
+    required: [model, reasoning, context_policy]
+    properties:
+      model:
+        type: object
+        required: [name, path]
+        properties:
+          name: { type: string }
+          path: { type: string }
+      reasoning:
+        type: object
+        required: [allow_rag, allow_tools]
+        properties:
+          allow_rag: { type: boolean }
+          allow_tools: { type: boolean }
+          disable_model_via_env: { type: boolean }
+      context_policy:
+        type: object
+        required: [allowed_topics, denied_topics]
+        properties:
+          allowed_topics:
+            type: array
+            items: { type: string }
+          denied_topics:
+            type: array
+            items: { type: string }
+  tools:
+    type: object
+    required: [enabled, providers]
+    properties:
+      enabled: { type: boolean }
+      providers:
+        type: array
+        items:
+          type: object
+          required: [name, endpoint, allowed_tools]
+          properties:
+            name: { type: string }
+            endpoint: { type: string }
+            allowed_tools:
+              type: array
+              items: { type: string }
+  rag:
+    type: object
+    required: [enabled]
+    properties:
+      enabled: { type: boolean }

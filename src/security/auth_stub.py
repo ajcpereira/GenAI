@@ -1,1 +1,2 @@
-def authorize(req): return True
+def authorize(request: dict) -> bool:
+    return True
