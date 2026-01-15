@@ -1,0 +1,24 @@
+vllm:
+  model_path: "/models/your-local-model"  # REQUIRED: local path to HF model directory
+  served_model_name: "local-model"
+  host: "127.0.0.1"
+  port: 8001
+  # extra_args are passed through to vLLM server entrypoint (advanced)
+  extra_args: []
+
+orchestrator:
+  # Keep this so you can point to a different vLLM later (remote or different port)
+  vllm_base_url: "http://127.0.0.1:8001"
+  model: "local-model"            # Must match served_model_name
+  request_timeout_s: 120
+  reserved_output_tokens: 512     # reserved headroom; runtime may clamp based on model context
+
+tools:
+  mcp:
+    enabled: true
+    base_url: "http://127.0.0.1:8765"     # your MCP server
+    tool_name_web_search: "web_search"
+    top_k: 5
+
+rag:
+  enabled: false  # placeholder; not implemented in Phase 1
