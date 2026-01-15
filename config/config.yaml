@@ -7,7 +7,7 @@ logging:
   core_log_file: "./logs/core.log"
 
 vllm:
-  model_path: "/models/your-local-model"  # REQUIRED: local path to HF model directory
+  model_path: "../models/mistral-7b-instruct"  # REQUIRED: local path to HF model directory
   served_model_name: "mistral-7b-instruct"
   host: "127.0.0.1"
   port: 8001
