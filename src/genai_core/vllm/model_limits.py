@@ -6,7 +6,6 @@ from transformers import AutoConfig, AutoTokenizer
 
 
 def derive_model_limits(model_path: str) -> Dict[str, int]:
-    """Derive runtime limits from local model files."""
     cfg = AutoConfig.from_pretrained(model_path, local_files_only=True, trust_remote_code=True)
     tok = AutoTokenizer.from_pretrained(model_path, local_files_only=True, use_fast=True, trust_remote_code=True)
 

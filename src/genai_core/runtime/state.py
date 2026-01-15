@@ -11,6 +11,5 @@ class ModelInfo:
 
 @dataclass
 class RuntimeState:
-    # Updated by VLLMLauncher
     vllm_health: Dict[str, Any] = field(default_factory=dict)
     model_info: Optional[ModelInfo] = None

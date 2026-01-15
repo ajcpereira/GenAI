@@ -1,9 +1,16 @@
-from fastapi import FastAPI
+import logging
+import uuid
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .orchestrator.agent import OrchestratorAgent
 from .tools.mcp_client import MCPClient
 from .runtime.state import RuntimeState
+
+
+log = logging.getLogger("genai_core.api")
 
 
 class ChatRequest(BaseModel):
@@ -17,6 +24,15 @@ def create_app(cfg: dict, runtime: RuntimeState) -> FastAPI:
 
     mcp = MCPClient.from_config(cfg.get("tools", {}).get("mcp", {}))
     orchestrator = OrchestratorAgent(cfg=cfg, runtime=runtime, mcp=mcp)
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        trace_id = str(uuid.uuid4())
+        log.exception("Unhandled error trace_id=%s path=%s", trace_id, request.url.path)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "internal_server_error", "trace_id": trace_id, "message": str(exc)},
+        )
 
     @app.get("/health")
     async def health():
