@@ -38,9 +38,44 @@ tools:
   mcp:
     enabled: true
     base_url: "http://127.0.0.1:8765"
-    tool_name_web_search: "web_search"
-    top_k: 5
-    timeout_s: 10
+    timeout_s: 30
+
+  web_search:
+    enabled: true
+    tool_name: "web_search"
+    provider: "brave"
+    base_url: "https://api.search.brave.com/res/v1/web/search"
+
+    auth:
+      api_key_env: "BRAVE_API_KEY"
+
+    limits:
+      top_k: 5
+      timeout_s: 12
+
+  influxdb:
+    enabled: true
+    tool_name: "influxdb_query"
+    description: "Consulta métricas e séries temporais no InfluxDB."
+    routing:
+      tags: ["metrics", "observability"]
+      intents: ["cpu_usage", "latency"]
+    connection:
+      url: "http://influxdb:8086"
+      org: "my-org"
+      bucket: "metrics"
+      token_env: "INFLUXDB_TOKEN"
+    limits:
+      max_rows: 5000
+      timeout_s: 10
+
 
 rag:
   enabled: false
+
+
+launcher:
+  spawn_mcp_host: true
+  mcp_host_url: "http://127.0.0.1:8765"
+  mcp_host_bind: "127.0.0.1"
+  mcp_host_port: 8765

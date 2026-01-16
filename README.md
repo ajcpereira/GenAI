@@ -1,91 +1,121 @@
-# GenAI Core – Phase 1 (vLLM + Orchestrator + MCP-ready)
+# GenAI Core (Phase 1)
 
-This repository is a Phase 1, **API-first** core that:
-- runs **only** with **vLLM** (OpenAI-compatible server),
-- starts vLLM from `main.py` (inside your Python virtual environment),
-- validates that vLLM started correctly (health check),
-- derives model limits offline from local model/tokenizer files,
-- runs an **Orchestrator Agent** that controls prompting and decoding per request,
-- supports an **MCP web_search** tool (pluggable) and is RAG-ready (placeholder),
-- always includes external info (internet/RAG) in the final answer as **Sources**,
-- chunks + summarizes external context if it would exceed the model window,
-- includes logging for both Core and vLLM subprocess.
+An **enterprise-grade**, **on-premises**, **API-first** GenAI core designed to be **secure by default**, **observable**, **configuration-driven**, and **extensible by design**.
 
-## 1) Requirements / Assumptions
-- On-prem deployment; you run inside a `venv`.
-- `vllm` is installed in that environment.
-- Local model path is available on disk (HF format).
-- Optional MCP server (if `tools.mcp.enabled=true`).
+This repository provides:
 
-## 2) Install
+- **Core API** (FastAPI)
+- **Orchestrator Agent** (the only component allowed to make control decisions)
+- **Model serving** via **vLLM** (OpenAI-compatible endpoints)
+- **Tool integration** via **MCP** (Model Context Protocol), prepared for multiple tools/agents
+
+---
+
+## Mens legis (binding intent)
+
+The objective of this project is to build an enterprise-grade GenAI platform that is on-premises, API-first, secure by default, observable, config-driven, and extensible by design.
+
+### Non-negotiable principles
+
+- Strict separation of responsibilities between **API**, **orchestration**, **execution**, **models**, and **tools**.
+- LLMs are **replaceable runtimes**, never autonomous entities; **vLLM** is used for model serving.
+- All control decisions (RAG, MCP/tools, context policy) are taken **exclusively** by the **Orchestrator Agent**.
+- All operational configuration (paths, models, endpoints, providers, flags) lives in **schema-validated YAML** files.
+
+---
+
+## Runtime language policy
+
+- The **codebase and documentation** are written in **English**.
+- At runtime, the system will **answer in the same language as the user's prompt**.
+  - Example: Portuguese prompt → Portuguese answer; English prompt → English answer.
+- If web search is used, the orchestrator will include a **mandatory disclosure** in the same language.
+
+---
+
+## Architecture overview
+
+1. **API** (`src/genai_core/api.py`)
+   - Exposes `/chat`, `/health`, `/ready`
+   - Enforces a strict response contract: always returns a non-empty `answer`
+   - Assigns and propagates a `X-Correlation-ID` for end-to-end observability
+
+2. **Orchestrator** (`src/genai_core/orchestrator/agent.py`)
+   - The only control-plane component
+   - Performs a **two-step pipeline**:
+     1) **Route decision**: `llm` vs `mcp_web` (structured JSON, schema-validated)
+     2) **Answer generation**: optionally enriched with MCP web results
+   - Enforces **tool-truth**: the model cannot claim web usage unless MCP was actually invoked
+   - Maintains lightweight per-session memory (configurable)
+
+3. **Tools / MCP** (`src/genai_core/tools/mcp_client.py`)
+   - A generic `call_tool()` interface (tool-agnostic orchestrator)
+   - Enterprise safeguards: retries + exponential backoff + simple circuit breaker
+   - Normalizes tool output for deterministic downstream processing
+
+4. **Model execution via vLLM** (`src/genai_core/vllm/*`)
+   - Uses OpenAI-compatible endpoints
+   - This Phase 1 orchestrator uses `/v1/completions` with a configurable chat template for stability (Mistral `[INST]`).
+
+5. **MCP Host (Python)** (`src/genai_core/mcp_host/*`)
+   - A lightweight scaffold to host MCP tools/agents in Python
+   - Designed for future expansion beyond internet search
+
+---
+
+## Configuration
+
+Configuration is stored in `config/config.yaml` and validated against a Pydantic schema in `src/genai_core/config/schema.py`.
+
+Notable settings:
+
+- `logging.rotation`: size/time/none rotation
+- `orchestrator.*`: router and answer generation controls
+  - `router_*`: routing JSON step (tool decision)
+  - `answer_temperature`, token caps
+  - `web_budget_per_session`: cost/risk control
+- `tools.mcp.*`: MCP endpoint + robustness
+  - retries, backoff, circuit breaker thresholds
+
+---
+
+## Running
+
+### Install
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 3) Configure
-Edit `config/config.yaml`:
-- `vllm.model_path`: path to the local model
-- `vllm.served_model_name`: model id exposed by vLLM
-- `orchestrator.model`: must match `served_model_name`
-- `tools.mcp.*`: MCP endpoint and timeouts
-- `logging.*`: log file paths and level
+### Start
 
-### Deterministic interpreter (optional)
-To force which Python interpreter starts vLLM (recommended for deterministic ops):
-```yaml
-vllm:
-  python_bin: "/path/to/venv/bin/python"
+```bash
+python main.py --config config/config.yaml
 ```
 
-## 4) Run
-```bash
-python main.py
-```
+### Test
 
-## 5) Test (curl)
-
-### Health
 ```bash
-curl -s http://127.0.0.1:8000/health | jq
-curl -s http://127.0.0.1:8001/health | jq
-```
-
-### Chat via Core
-```bash
-curl -s -X POST http://127.0.0.1:8000/chat \
+curl -s -X POST "http://127.0.0.1:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"user_id":"u1","session_id":"s1","message":"Como te chamas?"}' | jq
+  -d '{"user_id":"u1","session_id":"s1","message":"Say only the word OK."}' | jq -r '.answer'
 ```
-
-### Direct vLLM check
-```bash
-curl -s -X POST http://127.0.0.1:8001/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"mistral-7b-instruct","messages":[{"role":"user","content":"Diz apenas a palavra OK."}],"max_tokens":16,"temperature":0}' | jq
-```
-
-## 6) Orchestrator behavior (industry guardrails)
-
-### On-the-fly decoding
-The orchestrator adjusts generation parameters per request:
-- `temperature`: default 0.0 (Phase 1 predictability)
-- `max_tokens`: bounded by `reserved_output_tokens` and `max_tokens_cap`
-- for short-format requests (e.g. “apenas a palavra OK”) it uses very small `max_tokens` and stop sequences
-
-### Tool routing
-To avoid “hallucinated tool use”, Phase 1 first applies a heuristic: only messages with freshness triggers
-(e.g., “hoje”, “últimas”, “release”, “2026”) can call the LLM tool-decision step.
-
-### Tool failures: fail-open (fixes 500)
-If MCP is enabled but unreachable, chat does not crash. The response continues, and a tool error entry is included under `Sources`.
-
-## 7) Logging & troubleshooting
-- Core logs: `./logs/core.log`
-- vLLM logs: `./logs/vllm.log` (subprocess stdout/stderr)
-
-If vLLM fails to start, `VLLMLauncher` raises with the last log lines and the log file path.
 
 ---
-Copyright (c) 2026
+
+## Security and safety notes
+
+- The orchestrator is the only component permitted to call tools.
+- Tool usage is disclosed in the final answer when invoked.
+- The model is not allowed to claim external verification unless provided tool context.
+
+---
+
+## Roadmap (Phase 2+)
+
+- First-class tool registry with per-tool authz and policy rules
+- Dedicated time/date tool (no internet required)
+- RAG integration behind the orchestrator control plane
+- Structured logging (JSON) and OpenTelemetry export

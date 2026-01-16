@@ -6,3 +6,5 @@ tenacity>=8.2
 transformers>=4.41
 torch>=2.1; platform_system != "Darwin"
 pydantic>=2.6
+jinja2>=3.1
+influxdb-client

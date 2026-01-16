@@ -1,45 +1,48 @@
 import asyncio
 import logging
 import signal
-from pathlib import Path
 
 import uvicorn
-import yaml
 
+from src.genai_core.api import create_app
+from src.genai_core.config.load import load_and_validate_config
+from src.genai_core.logging_setup import setup_logging
+from src.genai_core.mcp_host.launcher import MCPHostLauncher
 from src.genai_core.runtime.state import RuntimeState
 from src.genai_core.vllm.launcher import VLLMLauncher
-from src.genai_core.api import create_app
-from src.genai_core.logging_setup import setup_logging
-
 
 log = logging.getLogger("genai_core.main")
 
 
-def load_config(config_path: str) -> dict:
-    p = Path(config_path)
-    if not p.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
-    return yaml.safe_load(p.read_text(encoding="utf-8"))
-
-
 async def amain(config_path: str = "config/config.yaml") -> int:
-    cfg = load_config(config_path)
+    cfg, cfg_model = load_and_validate_config(config_path)
 
     # Logging first, so any startup crash is visible.
     log_cfg = cfg.get("logging", {})
     setup_logging(
         level=log_cfg.get("level", "INFO"),
         log_file=log_cfg.get("core_log_file", "./logs/core.log"),
+        rotation=log_cfg.get("rotation", {}),
     )
 
-    api_host = cfg.get("api", {}).get("host", "127.0.0.1")
-    api_port = int(cfg.get("api", {}).get("port", 8000))
+    api_host = cfg_model.api.host
+    api_port = int(cfg_model.api.port)
 
     runtime = RuntimeState()
     runtime.ready = False
     runtime.ready_reason = "starting"
 
-    launcher = VLLMLauncher(cfg["vllm"], runtime=runtime)
+    vllm_launcher = VLLMLauncher(cfg["vllm"], runtime=runtime)
+
+    # MCP Host launcher config (optional)
+    tools_cfg = cfg.get("tools", {})
+    mcp_cfg = tools_cfg.get("mcp", {})
+    mcp_enabled = bool(mcp_cfg.get("enabled", False))
+
+    # Default MCP host bind/port should match tools.mcp.base_url, but we keep it explicit for launcher.
+    # If you want, you can derive host/port from base_url; for now keep config simple.
+    mcp_launcher_cfg = cfg.get("mcp_host", {}) or {}
+    mcp_launcher = MCPHostLauncher(cfg=mcp_launcher_cfg, runtime=runtime) if mcp_enabled else None
 
     app = create_app(cfg=cfg, runtime=runtime)
 
@@ -80,34 +83,59 @@ async def amain(config_path: str = "config/config.yaml") -> int:
 
     api_task.add_done_callback(_api_done)
 
-    # Warmup vLLM in background
-    async def warmup_vllm():
+    # Warmup in background (MCP then vLLM)
+    async def warmup():
         try:
             runtime.ready = False
+            runtime.ready_reason = "starting_dependencies"
+
+            # 1) MCP Host (best-effort; do not block readiness if it fails)
+            if mcp_launcher is not None:
+                try:
+                    runtime.ready_reason = "starting_mcp_host"
+                    log.info("Warmup: starting/attaching MCP Host in background...")
+                    await mcp_launcher.start_and_wait_healthy()
+                except Exception as e:
+                    runtime.mcp_health = {"status": "unhealthy", "error": str(e)}
+                    log.warning("MCP Host warmup failed (continuing without web): %s", str(e))
+
+            # 2) vLLM (required for readiness)
             runtime.ready_reason = "starting_vllm"
             log.info("Warmup: starting/attaching vLLM in background...")
+            await vllm_launcher.start_and_wait_healthy()
 
-            await launcher.start_and_wait_healthy()
             runtime.ready_reason = "loading_model_limits"
-            await launcher.populate_runtime_model_limits()
+            await vllm_launcher.populate_runtime_model_limits()
 
             runtime.ready = True
             runtime.ready_reason = "ready"
-            log.info("Warmup complete: READY (vLLM=%s model=%s)", runtime.vllm_health, runtime.model_info.model_name if runtime.model_info else None)
+            log.info(
+                "Warmup complete: READY (vLLM=%s model=%s MCP=%s)",
+                runtime.vllm_health,
+                runtime.model_info.model_name if runtime.model_info else None,
+                runtime.mcp_health,
+            )
 
         except Exception as e:
             runtime.ready = False
             runtime.ready_reason = f"warmup_failed: {e}"
             log.exception("Warmup failed: %s", str(e))
 
-    warmup_task = asyncio.create_task(warmup_vllm(), name="vllm_warmup")
+    warmup_task = asyncio.create_task(warmup(), name="warmup")
 
     # Wait for either a signal or API crash
     await stop_event.wait()
 
     # Cleanup
-    log.info("Stopping vLLM (if owned)...")
-    await launcher.stop()
+    log.info("Stopping dependencies...")
+
+    if mcp_launcher is not None:
+        try:
+            await mcp_launcher.stop()
+        except Exception:
+            pass
+
+    await vllm_launcher.stop()
 
     server.should_exit = True
     try:
@@ -115,7 +143,6 @@ async def amain(config_path: str = "config/config.yaml") -> int:
     except Exception:
         pass
 
-    # Stop warmup task if still running
     if not warmup_task.done():
         warmup_task.cancel()
 

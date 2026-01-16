@@ -12,6 +12,7 @@ class ModelInfo:
 @dataclass
 class RuntimeState:
     vllm_health: Dict[str, Any] = field(default_factory=dict)
+    mcp_health: Dict[str, Any] = field(default_factory=dict)
     model_info: Optional[ModelInfo] = None
 
     # Readiness state for FastAPI-first startup
