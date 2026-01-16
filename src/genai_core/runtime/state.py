@@ -13,3 +13,7 @@ class ModelInfo:
 class RuntimeState:
     vllm_health: Dict[str, Any] = field(default_factory=dict)
     model_info: Optional[ModelInfo] = None
+
+    # Readiness state for FastAPI-first startup
+    ready: bool = False
+    ready_reason: str = "starting"

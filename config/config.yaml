@@ -15,7 +15,17 @@ vllm:
   # python_bin: "/home/genai/.venv/bin/python"
   log_file: "./logs/vllm.log"
   startup_timeout_s: 180
-  extra_args: []
+  extra_args:
+    # IMPORTANT: force HuggingFace tokenizer to allow chat-template override
+    - "--tokenizer-mode"
+    - "hf"
+    # Now you may provide a chat template
+    - "--chat-template"
+    - "config/chat_templates/mistral_inst.jinja"
+    - "--chat-template-content-format"
+    - "string"
+
+
 
 orchestrator:
   vllm_base_url: "http://127.0.0.1:8001"

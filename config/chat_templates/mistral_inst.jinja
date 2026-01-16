@@ -1,0 +1,15 @@
+{# Minimal Mistral Instruct template with system support #}
+{% set system_msg = '' %}
+{% for m in messages %}
+  {% if m['role'] == 'system' %}
+    {% set system_msg = system_msg + m['content'] + '\n' %}
+  {% endif %}
+{% endfor %}
+
+{% for m in messages %}
+  {% if m['role'] == 'user' %}
+[INST] {{ (system_msg + m['content']).strip() }} [/INST]
+  {% elif m['role'] == 'assistant' %}
+{{ m['content'].strip() }}
+  {% endif %}
+{% endfor %}
