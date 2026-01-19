@@ -6,78 +6,84 @@ from typing import Any, Dict, List, Optional
 
 @dataclass(frozen=True)
 class ToolDef:
-    key: str                 # key in YAML under tools.<key>
-    tool_name: str           # MCP tool name (what MCP Host registry uses)
+    key: str
+    tool_name: str
+    enabled: bool
     description: str
     tags: List[str]
     intents: List[str]
-    enabled: bool
-    config: Dict[str, Any]   # full tool config (connection/limits/etc.), excluding mcp transport
+    config: Dict[str, Any]
 
 
 class ToolCatalog:
     """
-    Reads tools from cfg["tools"] in a config-driven way.
-    We keep tools.mcp as the transport config; other entries are logical tools.
+    Config-driven tool catalog (new format only).
+
+    tools:
+      mcp: {...}
+      web_search:
+        enabled: true
+        tool_name: "web_search"
+        routing:
+          tags: ["sources", "freshness"]
+          intents: ["latest_version", "news"]
+        limits:
+          top_k: 5
     """
 
     def __init__(self, cfg: Dict[str, Any]):
-        self._cfg = cfg or {}
-        self._tools_cfg = (self._cfg.get("tools") or {}) if isinstance(self._cfg, dict) else {}
+        self.cfg = cfg or {}
+        self._tools: Dict[str, ToolDef] = {}
+        self._load()
 
-    def list_enabled_tools(self) -> List[ToolDef]:
-        out: List[ToolDef] = []
-        for key, tcfg in self._tools_cfg.items():
+    def _load(self) -> None:
+        tools_cfg = self.cfg.get("tools")
+        if not isinstance(tools_cfg, dict):
+            return
+
+        for key, spec in tools_cfg.items():
             if key == "mcp":
                 continue
-            if not isinstance(tcfg, dict):
+            if not isinstance(spec, dict):
                 continue
 
-            enabled = bool(tcfg.get("enabled", False))
-            tool_name = str(tcfg.get("tool_name") or key).strip()
-            desc = str(tcfg.get("description") or "").strip()
+            enabled = bool(spec.get("enabled", True))
+            tool_name = str(spec.get("tool_name") or key).strip()
+            description = str(spec.get("description") or "").strip()
 
-            routing = tcfg.get("routing") or {}
-            tags = [str(x).strip() for x in (routing.get("tags") or []) if str(x).strip()]
-            intents = [str(x).strip() for x in (routing.get("intents") or []) if str(x).strip()]
+            routing = spec.get("routing") if isinstance(spec.get("routing"), dict) else {}
+            tags = routing.get("tags") if isinstance(routing.get("tags"), list) else []
+            intents = routing.get("intents") if isinstance(routing.get("intents"), list) else []
 
-            out.append(
-                ToolDef(
-                    key=key,
-                    tool_name=tool_name,
-                    description=desc,
-                    tags=tags,
-                    intents=intents,
-                    enabled=enabled,
-                    config=tcfg,
-                )
+            self._tools[key] = ToolDef(
+                key=key,
+                tool_name=tool_name,
+                enabled=enabled,
+                description=description,
+                tags=[str(x) for x in tags],
+                intents=[str(x) for x in intents],
+                config=spec,
             )
 
-        return [t for t in out if t.enabled]
+    def list_enabled_tools(self) -> List[ToolDef]:
+        return [t for t in self._tools.values() if t.enabled]
 
     def get_tool(self, key: str) -> Optional[ToolDef]:
-        key = (key or "").strip()
-        if not key:
-            return None
+        t = self._tools.get(key)
+        return t if (t and t.enabled) else None
+
+    def pick_by_tag(self, tag: str) -> Optional[ToolDef]:
+        tag_l = (tag or "").strip().lower()
         for t in self.list_enabled_tools():
-            if t.key == key:
+            if tag_l in [x.lower() for x in (t.tags or [])]:
                 return t
         return None
 
     def render_for_router_prompt(self) -> str:
-        """
-        A compact tool list for the LLM router, derived from YAML.
-        """
-        tools = self.list_enabled_tools()
-        if not tools:
-            return "(nenhuma tool MCP habilitada)"
-
         lines: List[str] = []
-        for t in tools:
+        for t in self.list_enabled_tools():
+            limits = t.config.get("limits") if isinstance(t.config.get("limits"), dict) else {}
             lines.append(
-                f"- key={t.key} tool_name={t.tool_name}\n"
-                f"  description={t.description}\n"
-                f"  tags={t.tags}\n"
-                f"  intents={t.intents}"
+                f"- key={t.key} tool_name={t.tool_name} tags={t.tags} intents={t.intents} limits={limits} desc={t.description[:160]}"
             )
-        return "\n".join(lines)
+        return "\n".join(lines).strip()

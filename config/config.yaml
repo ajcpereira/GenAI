@@ -42,9 +42,8 @@ tools:
 
   web_search:
     enabled: true
-    tool_name: "web_search"
-    provider: "brave"
-    base_url: "https://api.search.brave.com/res/v1/web/search"
+    routing:
+      tags: ["freshness","sources"]
 
     auth:
       api_key_env: "BRAVE_API_KEY"
