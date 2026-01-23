@@ -1,121 +1,142 @@
-# GenAI Core (Phase 1)
+# GenAIv2 — On‑Prem Orchestrated GenAI (FastAPI + vLLM + MCP)
 
-An **enterprise-grade**, **on-premises**, **API-first** GenAI core designed to be **secure by default**, **observable**, **configuration-driven**, and **extensible by design**.
+This repository implements an on‑prem orchestration service that:
+- Accepts chat-style user requests (`POST /api/chat`)
+- Discovers tools dynamically from an MCP Host (`GET /mcp/tools`)
+- Plans tool usage via a **Planner LLM**
+- Validates the plan with deterministic rules (schema + caps + allowlist)
+- Executes tool calls as a DAG (topological order)
+- Produces a final answer via a **Responder LLM**
 
-This repository provides:
+The design goal is **contract-first orchestration**:
+- Contracts live in `config/internal-json.json`
+- Each stage validates inputs/outputs against the contracts
+- The system favors **reliability** (fail fast, replan, bounded execution)
 
-- **Core API** (FastAPI)
-- **Orchestrator Agent** (the only component allowed to make control decisions)
-- **Model serving** via **vLLM** (OpenAI-compatible endpoints)
-- **Tool integration** via **MCP** (Model Context Protocol), prepared for multiple tools/agents
+## Components
 
----
+- **gateway-service** (optional; not in this repo): reverse proxy / API entry
+- **orchestrator-service** (this repo): planning + validation + execution + response assembly
+- **llm-service**: vLLM exposing an OpenAI-compatible API (planner + responder)
+- **mcp-host**: exposes tool discovery and tool execution endpoints
+- **session store** (optional): Postgres/Redis-backed conversation state (future extension)
 
-## Mens legis (binding intent)
+## API
 
-The objective of this project is to build an enterprise-grade GenAI platform that is on-premises, API-first, secure by default, observable, config-driven, and extensible by design.
+### `POST /api/chat`
 
-### Non-negotiable principles
+Request body (UserRequestPayload):
+- `message` (string)
+- `enabled_tools` (string[]) — optional per-request allowlist at the UI/API boundary
 
-- Strict separation of responsibilities between **API**, **orchestration**, **execution**, **models**, and **tools**.
-- LLMs are **replaceable runtimes**, never autonomous entities; **vLLM** is used for model serving.
-- All control decisions (RAG, MCP/tools, context policy) are taken **exclusively** by the **Orchestrator Agent**.
-- All operational configuration (paths, models, endpoints, providers, flags) lives in **schema-validated YAML** files.
+Response:
+- Envelope with `payload.answer` (string) on success
+- Envelope with `payload.error` (structured) on failure
 
----
+## Decision logic (high-level)
 
-## Runtime language policy
+1. **Tool discovery**
+   - Orchestrator calls MCP Host: `GET /mcp/tools`
+   - Filters by `enabled_tools` (request) and internal allow/deny policies
+   - Passes the resulting `allowed_tools` (name + description + schemas) to the Planner
 
-- The **codebase and documentation** are written in **English**.
-- At runtime, the system will **answer in the same language as the user's prompt**.
-  - Example: Portuguese prompt → Portuguese answer; English prompt → English answer.
-- If web search is used, the orchestrator will include a **mandatory disclosure** in the same language.
+2. **Planning**
+   - Planner emits `PlannerOutput` (strict JSON)
+   - If it proposes tool calls, each `tool_call` step MUST include a non-empty `capability` matching an allowed tool name
 
----
+3. **Validation**
+   - Validator enforces:
+     - schema correctness
+     - hard caps (`max_steps`, `max_tool_calls`)
+     - dependencies (no cycles, no missing steps)
+     - tool allowlist/policy constraints
 
-## Architecture overview
+4. **Replan loop**
+   - If validation fails, Orchestrator provides compact validation feedback to Planner and retries planning (`orchestrator.max_replans`)
+   - If replans are exhausted, returns `INVALID_PLAN`
 
-1. **API** (`src/genai_core/api.py`)
-   - Exposes `/chat`, `/health`, `/ready`
-   - Enforces a strict response contract: always returns a non-empty `answer`
-   - Assigns and propagates a `X-Correlation-ID` for end-to-end observability
+5. **Execution**
+   - Executor runs steps (DAG order)
+   - For each `tool_call`, it calls MCP Host `/mcp/tools/{name}:run`
+   - Execution results are recorded as `steps_executed[]`
 
-2. **Orchestrator** (`src/genai_core/orchestrator/agent.py`)
-   - The only control-plane component
-   - Performs a **two-step pipeline**:
-     1) **Route decision**: `llm` vs `mcp_web` (structured JSON, schema-validated)
-     2) **Answer generation**: optionally enriched with MCP web results
-   - Enforces **tool-truth**: the model cannot claim web usage unless MCP was actually invoked
-   - Maintains lightweight per-session memory (configurable)
+6. **Final answer**
+   - Responder receives a `FinalLLMInput` containing intent + execution results
+   - Responder returns a JSON object `{"answer":"..."}` when `responder.use_structured_outputs=true`
+   - Orchestrator returns only the `answer` string to the user
 
-3. **Tools / MCP** (`src/genai_core/tools/mcp_client.py`)
-   - A generic `call_tool()` interface (tool-agnostic orchestrator)
-   - Enterprise safeguards: retries + exponential backoff + simple circuit breaker
-   - Normalizes tool output for deterministic downstream processing
+## Flowchart
 
-4. **Model execution via vLLM** (`src/genai_core/vllm/*`)
-   - Uses OpenAI-compatible endpoints
-   - This Phase 1 orchestrator uses `/v1/completions` with a configurable chat template for stability (Mistral `[INST]`).
+```mermaid
+flowchart TD
+    A[Client<br/>POST /api/chat] --> B[API Layer<br/>Validate UserRequestPayload<br/>Create Envelope(request)]
+    B --> C[Orchestrator.handle_message<br/>request_id + metadata]
 
-5. **MCP Host (Python)** (`src/genai_core/mcp_host/*`)
-   - A lightweight scaffold to host MCP tools/agents in Python
-   - Designed for future expansion beyond internet search
+    C --> D[MCP Discovery<br/>HTTP GET MCP Host /mcp/tools]
+    D --> E[Filter tools by enabled_tools + policy<br/>Build ToolPolicy allowlist]
 
----
+    E --> F[PlannerInput<br/>user_message + allowed_tools + locale + optional replan_feedback]
+    F --> G[Planner LLM (vLLM)<br/>/v1/chat/completions<br/>response_format=json_object]
+
+    G --> H[PlannerOutput<br/>plan.steps[] + confidence]
+    H --> I[PlanValidator.validate<br/>schema + caps + allowlist + deps]
+
+    I -->|invalid and replans left| R[Build replan_feedback<br/>validation.errors + warnings]
+    R --> F
+
+    I -->|invalid and no replans left| Z[Envelope(error)<br/>INVALID_PLAN]
+
+    I -->|valid| N[ExecutorInput<br/>plan + tool_policy + discovered_tools]
+    N --> O[Executor.execute_plan<br/>Topological sort]
+    O --> P{Step type}
+    P -->|tool_call| S[HTTP POST MCP Host<br/>/mcp/tools/{capability}:run]
+    P -->|compose| Q[Compose context step]
+    S --> T[Record StepExecution(output/error)]
+    Q --> V[Record StepExecution(context)]
+    T --> O
+    V --> O
+
+    O --> W[ExecutorResult<br/>steps_executed[]]
+    W --> X[OutputValidator.validate]
+
+    X -->|invalid| Y[Envelope(error)<br/>INVALID_OUTPUT]
+    X -->|ok| AA[FinalLLMInput<br/>intent + steps_executed]
+
+    AA --> AB[Responder LLM (vLLM)<br/>/v1/chat/completions<br/>response_format=json_object]
+    AB --> AC[Envelope(response)<br/>AnswerPayload.answer]
+
+    Z --> AE[HTTP error response]
+    Y --> AE
+    AC --> AF[HTTP success response]
+```
 
 ## Configuration
 
-Configuration is stored in `config/config.yaml` and validated against a Pydantic schema in `src/genai_core/config/schema.py`.
+All runtime configuration is in `config/config.yaml`.
 
-Notable settings:
+Key tuning knobs:
+- `logging.*` — directory, stdout, per-component files, rotation policy
+- `planner.*` — vLLM URL/model, JSON mode, timeouts, retries, stop tokens
+- `orchestrator.*` — confidence threshold, replans, caps
+- `validator.*` — caps on steps/tool calls
+- `executor.*` — caps and payload size limits
+- `responder.*` — vLLM URL/model, structured outputs to prevent reasoning leakage
+- `mcp.*` — MCP Host base URL and timeouts
 
-- `logging.rotation`: size/time/none rotation
-- `orchestrator.*`: router and answer generation controls
-  - `router_*`: routing JSON step (tool decision)
-  - `answer_temperature`, token caps
-  - `web_budget_per_session`: cost/risk control
-- `tools.mcp.*`: MCP endpoint + robustness
-  - retries, backoff, circuit breaker thresholds
-
----
+See the `commentary:` section inside `config/config.yaml` for a complete list of tunables.
 
 ## Running
-
-### Install
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# Ensure vLLM is running (OpenAI-compatible) and MCP Host is available
+python main.py
 ```
 
-### Start
+## Notes on logging and disk safety
 
-```bash
-python main.py --config config/config.yaml
-```
-
-### Test
-
-```bash
-curl -s -X POST "http://127.0.0.1:8000/chat" \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"u1","session_id":"s1","message":"Say only the word OK."}' | jq -r '.answer'
-```
-
----
-
-## Security and safety notes
-
-- The orchestrator is the only component permitted to call tools.
-- Tool usage is disclosed in the final answer when invoked.
-- The model is not allowed to claim external verification unless provided tool context.
-
----
-
-## Roadmap (Phase 2+)
-
-- First-class tool registry with per-tool authz and policy rules
-- Dedicated time/date tool (no internet required)
-- RAG integration behind the orchestrator control plane
-- Structured logging (JSON) and OpenTelemetry export
+- File logs use rotation configured in `logging.rotation`.
+- Container stdout logs (Docker/Podman) must also be rotated via the runtime’s log driver; file rotation does not control stdout volume.

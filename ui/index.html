@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GenAI Orchestrator</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="title">GenAI Orchestrator</div>
+        <div class="subtitle">UI em /ui · API em /api</div>
+      </div>
+
+      <div class="meta">
+        <div class="pill">
+          <span class="k">session</span>
+          <span id="sessionId" class="v">—</span>
+        </div>
+        <div class="pill">
+          <span class="k">last request</span>
+          <span id="requestId" class="v">—</span>
+        </div>
+        <div class="pill">
+          <span class="k">latency</span>
+          <span id="latencyMs" class="v">—</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="panel">
+          <div class="panelTitle">
+            <span>Tools</span>
+            <button id="refreshToolsBtn" class="btn btnSmall" title="Recarregar tools">Refresh</button>
+          </div>
+          <div class="panelHint">Por defeito, tudo off. A lista é dinâmica via /api/tools.</div>
+          <div id="toolsList" class="tools"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panelTitle"><span>Ajuda rápida</span></div>
+          <ul class="bullets">
+            <li>Ativa tools apenas quando necessário (custos/latência).</li>
+            <li>Abre “Details” para ver o Envelope completo devolvido pela API.</li>
+            <li>Quando pedires uma tool inexistente, recebes <code>TOOL_NOT_AVAILABLE</code> com a lista disponível.</li>
+          </ul>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div id="banner" class="banner" style="display:none;"></div>
+
+        <section id="messages" class="messages"></section>
+
+        <footer class="composer">
+          <textarea id="prompt" placeholder="Escreve a tua mensagem… (Enter envia, Shift+Enter nova linha)"></textarea>
+          <div class="composerRow">
+            <button id="sendBtn" class="btn btnPrimary">Enviar</button>
+            <button id="clearBtn" class="btn">Limpar chat</button>
+          </div>
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

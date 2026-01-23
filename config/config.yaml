@@ -1,80 +1,194 @@
-api:
-  host: "127.0.0.1"
+app:
+  name: genai-orchestrator
+  host: 0.0.0.0
   port: 8000
-
+  log_level: DEBUG
 logging:
-  level: "INFO"
-  core_log_file: "./logs/core.log"
+  log_dir: logs
+  stdout: true
+  files:
+    orchestrator: orchestrator.log
+    api: api.log
+    planner: planner.log
+    validator: validator.log
+    executor: executor.log
+    responder: responder.log
+  level: DEBUG
+  rotation:
+    max_bytes: 10485760
+    backup_count: 5
+    use_timed_rotation: false
+    when: D
+    interval: 1
+    timed_backup_count: 7
+ui:
+  enabled: true
+planner:
+  vllm_base_url: http://127.0.0.1:8001
+  model: models/rhdeepseek
+  mode: chat_completions
+  api_key: EMPTY
+  use_structured_outputs: true
+  disable_repair_when_structured: true
+  repair_attempts: 1
+  repair_max_tokens: 768
+  health_timeout_s: 2.0
+  health_paths:
+  - /health
+  - /v1/models
+  temperature: 0
+  top_p: 1.0
+  max_tokens: 1024
+  timeout_s: 20
+  strict_json: true
+  stop:
+  - '```'
+  - '
 
-vllm:
-  model_path: "../models/mistral-7b-instruct"  # REQUIRED: local path to HF model directory
-  served_model_name: "mistral-7b-instruct"
-  host: "127.0.0.1"
-  port: 8001
-  # Optional: explicit interpreter (recommended for deterministic venv usage)
-  # python_bin: "/home/genai/.venv/bin/python"
-  log_file: "./logs/vllm.log"
-  startup_timeout_s: 180
-  extra_args:
-    # IMPORTANT: force HuggingFace tokenizer to allow chat-template override
-    - "--tokenizer-mode"
-    - "hf"
-    # Now you may provide a chat template
-    - "--chat-template"
-    - "config/chat_templates/mistral_inst.jinja"
-    - "--chat-template-content-format"
-    - "string"
-
-
-
+    ## '
+  - <END_JSON>
+  chat_path: /v1/chat/completions
+  completions_path: /v1/completions
+  system_prompt: "You are the Planner component in an enterprise orchestration system.\n\
+    \nOutput MUST be ONLY a single JSON object that conforms to the PlannerOutput\
+    \ schema.\nDo not output markdown. Do not output code fences. Do not output commentary.\n\
+    Do not wrap the output under any key (e.g., NEVER output \"planner_output\").\n\
+    Do not include any keys other than: user_intent, plan, violations.\n\nREQUIRED\
+    \ SHAPE (high-level):\n- user_intent: object with keys:\n    - summary (string,\
+    \ required)\n    - type (string, required): one of [\"informational\",\"action\"\
+    ,\"creative\",\"other\"]\n    - confidence (number in [0,1], required)\n    -\
+    \ locale (string, optional)\n- plan: object with keys:\n    - strategy (string,\
+    \ required): one of [\"sequential\",\"parallel\",\"hybrid\"]\n    - steps (array,\
+    \ required; min 1)\n- violations: optional array of objects with keys code, message,\
+    \ detail (optional)\n\nSTEP RULES:\n- Each step MUST include: id (string), type\
+    \ (string), description (string), inputs (object), dependencies (array of step\
+    \ ids).\n- step.type MUST be one of: [\"tool_call\",\"compose\",\"rag_query\"\
+    ,\"compute\",\"other\"].\n- Include step.capability for every step:\n    - For\
+    \ type=\"compose\" set capability=null (required)\n    - For type=\"tool_call\"\
+    \ capability is REQUIRED and MUST be a non-empty string equal to an allowed tool\
+    \ name (see TOOL CATALOG)\n- Use inputs (NOT args). Never use \"args\".\n- dependencies\
+    \ MUST be [] for the first step; otherwise reference prior step ids.\n- plan must\
+    \ be an object. Never output plan as a list.\n\nTOOL USAGE:\n- Tools are provided\
+    \ in the TOOL CATALOG section below (injected at runtime).\n- If you use a tool,\
+    \ step.type MUST be \"tool_call\".\n- step.capability MUST exactly match the tool\
+    \ \"name\" from the TOOL CATALOG (exact string match).\n  Do NOT transform punctuation\
+    \ (do NOT replace '.' with '_' or vice-versa).\n- Never invent tools or capabilities.\
+    \ Only use capabilities that appear in the TOOL CATALOG.\n\nPLANNING STRATEGY:\n\
+    - Default to a single compose step when the request can be answered without external\
+    \ data/tools.\n- Use tool_call only when a tool is clearly required to answer\
+    \ correctly.\n- If a tool is required but the TOOL CATALOG is empty, keep a single\
+    \ compose step and set confidence low (<0.2).\n\nLOCALE:\n- Use the provided USER_LOCALE\
+    \ value for user_intent.locale when possible.\n- Write user_intent.summary and\
+    \ all textual fields primarily in USER_LOCALE language.\n"
+  default_locale: pt
+  max_dependency_depth: 15
+  retries: 2
+  max_steps: 40
+  max_tool_calls: 15
+  allow_optional_tool_calls: false
+mcp:
+  base_url: http://127.0.0.1:8010
+  timeout_s: 10.0
+  caller_id: orchestrator
+responder:
+  vllm_base_url: http://127.0.0.1:8001
+  model: models/rhdeepseek
+  api_key: EMPTY
+  timeout_s: 20.0
+  temperature: 0.2
+  max_tokens: 512
+  use_structured_outputs: true
+contracts:
+  bundle_path: config/internal-json.json
 orchestrator:
-  vllm_base_url: "http://127.0.0.1:8001"
-  model: "mistral-7b-instruct"
-  request_timeout_s: 120
-  reserved_output_tokens: 128
-  max_tokens_cap: 256
-
-tools:
+  confidence_threshold: 0.8
+  reject_unknown_enabled_tools: true
+  max_steps: 40
+  max_tool_calls: 15
+  max_replans: 2
+executor:
+  max_steps: 40
+  max_input_bytes_per_step: 64000
+  allow_optional_tool_calls: false
+validator:
+  max_steps: 40
+  max_tool_calls: 15
+  allow_optional_tool_calls: false
+cors:
+  enabled: true
+  allow_origins:
+  - http://localhost:8000
+  - http://localhost:5173
+  allow_headers:
+  - '*'
+  allow_methods:
+  - '*'
+  allow_credentials: true
+commentary:
+  app:
+    name: Service name shown in OpenAPI docs.
+    host: Bind address for uvicorn when running main.py directly.
+    port: Bind port for uvicorn when running main.py directly.
+    log_level: Default log level (INFO/DEBUG/WARNING/ERROR). Prefer setting logging.level
+      instead; kept for backward compatibility.
+  logging:
+    level: Global log level. If set, overrides app.log_level for logger configuration.
+    stdout: If true, emit JSON logs to stdout (in addition to file handlers).
+    log_dir: Directory where log files are written.
+    files: 'Per-component log file names. Keys: orchestrator, api, planner, validator,
+      executor, responder.'
+    rotation: Rotation policy for file logs (size-based and optional timed rotation).
+  planner:
+    vllm_base_url: Base URL for vLLM/OpenAI-compatible API (planner).
+    chat_path: Path for chat completions endpoint.
+    model: Model identifier passed to vLLM.
+    api_key: Bearer token; can be overridden by env VLLM_API_KEY.
+    timeout_s: HTTP client timeout in seconds.
+    temperature: Sampling temperature.
+    max_tokens: Max tokens for planner response.
+    use_structured_outputs: 'If true, sends response_format={type: json_object} when
+      supported.'
+    strict_json: If true, implies use_structured_outputs.
+    retries: Number of retries for vLLM call/parsing failures (not replans).
+    default_locale: Fallback locale if detection fails.
+    max_dependency_depth: Validator-like guardrail applied by PlannerRuleEngine.
   mcp:
-    enabled: true
-    base_url: "http://127.0.0.1:8765"
-    timeout_s: 30
-
-  web_search:
-    enabled: true
-    routing:
-      tags: ["freshness","sources"]
-
-    auth:
-      api_key_env: "BRAVE_API_KEY"
-
-    limits:
-      top_k: 5
-      timeout_s: 12
-
-  influxdb:
-    enabled: true
-    tool_name: "influxdb_query"
-    description: "Consulta métricas e séries temporais no InfluxDB."
-    routing:
-      tags: ["metrics", "observability"]
-      intents: ["cpu_usage", "latency"]
-    connection:
-      url: "http://influxdb:8086"
-      org: "my-org"
-      bucket: "metrics"
-      token_env: "INFLUXDB_TOKEN"
-    limits:
-      max_rows: 5000
-      timeout_s: 10
-
-
-rag:
-  enabled: false
-
-
-launcher:
-  spawn_mcp_host: true
-  mcp_host_url: "http://127.0.0.1:8765"
-  mcp_host_bind: "127.0.0.1"
-  mcp_host_port: 8765
+    base_url: Base URL for MCP host (tool discovery + tool run).
+    timeout_s: HTTP timeout when calling MCP host.
+    caller_id: Caller identifier header passed to MCP host (for allow/deny filtering).
+  executor:
+    max_steps: Hard cap on executed steps (safety).
+    max_input_bytes_per_step: Hard cap on serialized inputs sent to a tool step.
+    allow_optional_tool_calls: If false, optional tool calls are rejected by validator.
+  validator:
+    max_steps: Hard cap on planned steps.
+    max_tool_calls: Hard cap on planned tool_call steps.
+    allow_optional_tool_calls: If false, optional tool calls are rejected.
+  orchestrator:
+    confidence_threshold: If plan has no tool steps and confidence is below this,
+      responder returns insufficient info.
+    max_steps: Cap on overall plan size (enforced by validator).
+    max_tool_calls: Cap on tool_call count (enforced by validator).
+    max_replans: How many times orchestrator will ask planner to replan after INVALID_PLAN.
+    reject_unknown_enabled_tools: If true, request fails if enabled_tools contains
+      unknown tools (UI safety).
+  responder:
+    vllm_base_url: Base URL for vLLM/OpenAI-compatible API (responder).
+    model: Model identifier passed to vLLM.
+    timeout_s: HTTP timeout in seconds.
+    temperature: Sampling temperature for final answer.
+    max_tokens: Max tokens for final answer.
+    use_structured_outputs: If true, responder forces JSON output and extracts only
+      the answer field (prevents reasoning leakage).
+  cors:
+    enabled: Enable/disable CORS middleware.
+    allow_origins: List of allowed origins.
+    allow_methods: Allowed methods.
+    allow_headers: Allowed headers.
+    allow_credentials: Allow credentials.
+  ui:
+    enabled: Whether UI is served.
+    cookie_secure: Set Secure flag on session cookie.
+    cookie_max_age_s: Session cookie max age seconds.
+  contracts:
+    bundle_path: Path to internal contract bundle JSON (schemas).

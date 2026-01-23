@@ -1,154 +1,174 @@
-import asyncio
+# GenAIv2/main.py
 import logging
-import signal
+import time
+import uuid
+from typing import Dict, Any, Optional
 
+from fastapi import FastAPI, Request, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-from src.genai_core.api import create_app
-from src.genai_core.config.load import load_and_validate_config
-from src.genai_core.logging_setup import setup_logging
-from src.genai_core.mcp_host.launcher import MCPHostLauncher
-from src.genai_core.runtime.state import RuntimeState
-from src.genai_core.vllm.launcher import VLLMLauncher
+from utils.common import (
+    configure_logging,
+    load_yaml,
+    apply_env_overrides,
+    load_contract_bundle,
+    new_request_id,
+    set_request_context,
+    reset_request_context,
+)
 
-log = logging.getLogger("genai_core.main")
+from planner.planner import Planner
+from orchestrator.orchestrator import Orchestrator
+from executor.executor import Executor
+from responder.responder import Responder
+
+from api.api import make_router
+from api.ui import make_ui_router  # "/" -> "/ui/index.html" redirect
+
+logger = logging.getLogger("genai.main")
 
 
-async def amain(config_path: str = "config/config.yaml") -> int:
-    cfg, cfg_model = load_and_validate_config(config_path)
+def _new_session_id() -> str:
+    return str(uuid.uuid4())
 
-    # Logging first, so any startup crash is visible.
-    log_cfg = cfg.get("logging", {})
-    setup_logging(
-        level=log_cfg.get("level", "INFO"),
-        log_file=log_cfg.get("core_log_file", "./logs/core.log"),
-        rotation=log_cfg.get("rotation", {}),
+
+def create_app() -> FastAPI:
+    cfg: Dict[str, Any] = load_yaml("config/config.yaml")
+    cfg = apply_env_overrides(cfg)
+
+    configure_logging(cfg)
+
+    bundle = load_contract_bundle(cfg["contracts"]["bundle_path"])
+
+    # Core components (DI explícito, compatível com o teu design atual)
+    planner = Planner(cfg["planner"], bundle)
+
+    executor = Executor(
+        mcp_base_url=str(cfg["mcp"]["base_url"]),
+        mcp_timeout_s=float(cfg["mcp"].get("timeout_s", 10.0)),
+        caller_id=str(cfg["mcp"].get("caller_id", "orchestrator")),
+        max_steps=int(cfg.get("executor", {}).get("max_steps", cfg.get("orchestrator", {}).get("max_steps", 40))),
+        max_input_bytes_per_step=int(cfg.get("executor", {}).get("max_input_bytes_per_step", 64000)),
+        allow_optional_tool_calls=bool(cfg.get("executor", {}).get("allow_optional_tool_calls", False)),
     )
 
-    api_host = cfg_model.api.host
-    api_port = int(cfg_model.api.port)
+    responder = Responder(cfg.get("responder", {}), bundle)
 
-    runtime = RuntimeState()
-    runtime.ready = False
-    runtime.ready_reason = "starting"
+    orchestrator = Orchestrator(
+        planner=planner,
+        executor=executor,
+        responder=responder,
+        contract_bundle=bundle,
+        confidence_threshold=float(cfg.get("orchestrator", {}).get("confidence_threshold", 0.8)),
+        max_steps=int(cfg.get("orchestrator", {}).get("max_steps", 40)),
+        max_tool_calls=int(cfg.get("orchestrator", {}).get("max_tool_calls", 15)),
+        # NEW: para UI, responde TOOL_NOT_AVAILABLE se pedirem tools inválidas
+        reject_unknown_enabled_tools=bool(cfg.get("orchestrator", {}).get("reject_unknown_enabled_tools", True)),
+        max_replans=int(cfg.get("orchestrator", {}).get("max_replans", 2)),
+    )
 
-    vllm_launcher = VLLMLauncher(cfg["vllm"], runtime=runtime)
+    app = FastAPI(title=cfg["app"]["name"])
 
-    # MCP Host launcher config (optional)
-    tools_cfg = cfg.get("tools", {})
-    mcp_cfg = tools_cfg.get("mcp", {})
-    mcp_enabled = bool(mcp_cfg.get("enabled", False))
-
-    # Default MCP host bind/port should match tools.mcp.base_url, but we keep it explicit for launcher.
-    # If you want, you can derive host/port from base_url; for now keep config simple.
-    mcp_launcher_cfg = cfg.get("mcp_host", {}) or {}
-    mcp_launcher = MCPHostLauncher(cfg=mcp_launcher_cfg, runtime=runtime) if mcp_enabled else None
-
-    app = create_app(cfg=cfg, runtime=runtime)
-
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host=api_host,
-            port=api_port,
-            log_level="info",
+    # CORS (opcional)
+    cors_cfg = cfg.get("cors", {}) or {}
+    if bool(cors_cfg.get("enabled", False)):
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_cfg.get("allow_origins", ["*"]),
+            allow_credentials=bool(cors_cfg.get("allow_credentials", True)),
+            allow_methods=cors_cfg.get("allow_methods", ["*"]),
+            allow_headers=cors_cfg.get("allow_headers", ["*"]),
+            expose_headers=["x-request-id", "x-session-id", "x-latency-ms"],
         )
-    )
 
-    loop = asyncio.get_running_loop()
-    stop_event = asyncio.Event()
+    @app.middleware("http")
+    async def request_context_middleware(request: Request, call_next):
+        start = time.time()
 
-    def _handle_sig(signame: str):
-        log.info("Received %s - shutting down...", signame)
-        stop_event.set()
+        # request_id
+        req_id = request.headers.get("x-request-id") or new_request_id()
+        request.state.request_id = req_id
 
-    for s in (signal.SIGINT, signal.SIGTERM):
+        # trace ids (opcional)
+        request.state.trace_id = request.headers.get("x-trace-id")
+        request.state.span_id = request.headers.get("x-span-id")
+
+        # session_id: header -> cookie -> gerar novo
+        sess_id: Optional[str] = request.headers.get("x-session-id")
+        if not sess_id:
+            sess_id = request.cookies.get("genai_session_id")
+        if not sess_id:
+            sess_id = _new_session_id()
+        request.state.session_id = sess_id
+
+        # bind request context for log correlation across components
+        _ctx_tokens = set_request_context(
+            request_id=req_id,
+            session_id=sess_id,
+            trace_id=request.state.trace_id,
+            span_id=request.state.span_id,
+        )
+
         try:
-            loop.add_signal_handler(s, lambda ss=s: _handle_sig(ss.name))
-        except NotImplementedError:
-            pass
-
-    # Start API server FIRST
-    log.info("Starting Core API (FastAPI-first) on %s:%s", api_host, api_port)
-    api_task = asyncio.create_task(server.serve(), name="core_api_server")
-
-    def _api_done(task: asyncio.Task):
-        try:
-            task.result()
-            log.error("Core API server stopped unexpectedly.")
-        except Exception as e:
-            log.exception("Core API server crashed: %s", str(e))
+            response: Response = await call_next(request)
         finally:
-            stop_event.set()
+            # make sure context is reset even if downstream raises
+            reset_request_context(_ctx_tokens)
 
-    api_task.add_done_callback(_api_done)
+        elapsed_ms = int((time.time() - start) * 1000)
 
-    # Warmup in background (MCP then vLLM)
-    async def warmup():
-        try:
-            runtime.ready = False
-            runtime.ready_reason = "starting_dependencies"
+        response.headers["x-request-id"] = req_id
+        response.headers["x-session-id"] = sess_id
+        response.headers["x-latency-ms"] = str(elapsed_ms)
 
-            # 1) MCP Host (best-effort; do not block readiness if it fails)
-            if mcp_launcher is not None:
-                try:
-                    runtime.ready_reason = "starting_mcp_host"
-                    log.info("Warmup: starting/attaching MCP Host in background...")
-                    await mcp_launcher.start_and_wait_healthy()
-                except Exception as e:
-                    runtime.mcp_health = {"status": "unhealthy", "error": str(e)}
-                    log.warning("MCP Host warmup failed (continuing without web): %s", str(e))
+        # cookie para UI
+        ui_cfg = cfg.get("ui", {}) or {}
+        response.set_cookie(
+            key="genai_session_id",
+            value=sess_id,
+            httponly=False,         # UI pode ler se precisares; torna True quando passares a storage server-side
+            samesite="lax",
+            secure=bool(ui_cfg.get("cookie_secure", False)),
+            max_age=int(ui_cfg.get("cookie_max_age_s", 60 * 60 * 24 * 30)),
+        )
 
-            # 2) vLLM (required for readiness)
-            runtime.ready_reason = "starting_vllm"
-            log.info("Warmup: starting/attaching vLLM in background...")
-            await vllm_launcher.start_and_wait_healthy()
+        logger.info(
+            "http_request",
+            extra={
+                "request_id": req_id,
+                "session_id": sess_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status_code": response.status_code,
+                "latency_ms": elapsed_ms,
+            },
+        )
+        return response
 
-            runtime.ready_reason = "loading_model_limits"
-            await vllm_launcher.populate_runtime_model_limits()
+    # API
+    app.include_router(make_router(orchestrator, bundle), prefix="/api")
 
-            runtime.ready = True
-            runtime.ready_reason = "ready"
-            log.info(
-                "Warmup complete: READY (vLLM=%s model=%s MCP=%s)",
-                runtime.vllm_health,
-                runtime.model_info.model_name if runtime.model_info else None,
-                runtime.mcp_health,
-            )
+    # Root redirect "/" -> "/ui/index.html"
+    app.include_router(make_ui_router(), include_in_schema=False)
 
-        except Exception as e:
-            runtime.ready = False
-            runtime.ready_reason = f"warmup_failed: {e}"
-            log.exception("Warmup failed: %s", str(e))
+    # Static UI files
+    app.mount("/ui", StaticFiles(directory="ui", html=True), name="ui")
 
-    warmup_task = asyncio.create_task(warmup(), name="warmup")
+    return app
 
-    # Wait for either a signal or API crash
-    await stop_event.wait()
 
-    # Cleanup
-    log.info("Stopping dependencies...")
-
-    if mcp_launcher is not None:
-        try:
-            await mcp_launcher.stop()
-        except Exception:
-            pass
-
-    await vllm_launcher.stop()
-
-    server.should_exit = True
-    try:
-        await api_task
-    except Exception:
-        pass
-
-    if not warmup_task.done():
-        warmup_task.cancel()
-
-    log.info("Shutdown complete.")
-    return 0
-
+app = create_app()
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(amain()))
+    cfg = load_yaml("config/config.yaml")
+    cfg = apply_env_overrides(cfg)
+
+    uvicorn.run(
+        app,
+        host=cfg["app"].get("host", "0.0.0.0"),
+        port=int(cfg["app"].get("port", 8000)),
+        log_level=str(cfg["app"].get("log_level", "info")).lower(),
+        reload=False,
+    )
