@@ -17,9 +17,11 @@ class TimeNowTool:
         },
         output_schema={
             "type": "object",
-            "required": ["iso", "timezone"],
+            "required": ["iso", "date", "time", "timezone"],
             "properties": {
                 "iso": {"type": "string", "minLength": 1},
+                "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+                "time": {"type": "string", "pattern": "^\\d{2}:\\d{2}:\\d{2}$"},
                 "timezone": {"type": "string", "minLength": 1},
             },
             "additionalProperties": False,
@@ -31,9 +33,19 @@ class TimeNowTool:
         if tz_name:
             tz = ZoneInfo(str(tz_name))
             now = datetime.now(tz)
-            return {"iso": now.isoformat(), "timezone": str(tz_name)}
+            return {
+                "iso": now.isoformat(),
+                "date": now.strftime("%Y-%m-%d"),
+                "time": now.strftime("%H:%M:%S"),
+                "timezone": str(tz_name),
+            }
 
         now = datetime.now().astimezone()
         tz = now.tzinfo
         tz_label = getattr(tz, "key", None) or str(tz) or "system"
-        return {"iso": now.isoformat(), "timezone": tz_label}
+        return {
+            "iso": now.isoformat(),
+            "date": now.strftime("%Y-%m-%d"),
+            "time": now.strftime("%H:%M:%S"),
+            "timezone": tz_label,
+        }

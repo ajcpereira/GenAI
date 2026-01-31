@@ -176,8 +176,31 @@ def print_request(request_id, rows):
             steps = payload.get("steps_executed", [])
             for step in steps:
                 print(f"step {step.get('id')} -> {step.get('status')}")
-                if step.get("output"):
-                    print(f"  output      : {short(step.get('output'))}")
+                out = step.get("output")
+                if isinstance(out, dict) and out.get("tool_call"):
+                    tc = out.get("tool_call") or {}
+                    print(f"  tool        : {tc.get('capability')}")
+                    if tc.get("inputs") is not None:
+                        print(f"  inputs      : {short(tc.get('inputs'), max_len=260)}")
+
+                    http = out.get("http")
+                    if isinstance(http, dict):
+                        resp = http.get("response") or {}
+                        sc = resp.get("status_code")
+                        em = http.get("elapsed_ms")
+                        print(f"  http        : status={sc} elapsed_ms={em}")
+                        req = http.get("request") or {}
+                        if req.get("json") is not None:
+                            print(f"  http.request: {short(req.get('json'), max_len=260)}")
+                        if resp.get("json") is not None:
+                            print(f"  http.response.json: {short(resp.get('json'), max_len=260)}")
+                        elif resp.get("text") is not None:
+                            print(f"  http.response.text: {short(resp.get('text'), max_len=260)}")
+
+                    if out.get("data") is not None:
+                        print(f"  data        : {short(out.get('data'), max_len=260)}")
+                elif out is not None:
+                    print(f"  output      : {short(out)}")
                 if step.get("error"):
                     print(f"  error       : {step.get('error')}")
 

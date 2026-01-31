@@ -409,7 +409,16 @@ class Orchestrator:
         # Planner input payload (schema-driven)
         # ----------------
         recent_user_messages: List[Dict[str, Any]] = []
-        if self.session_store and session_id and current_user_seq:
+        # Guardrail: context policy is the only authority for whether recent turns are included.
+        # Even if we have persisted session history, we must not leak it into the planner when
+        # the classifier decided the message is standalone.
+        include_recent_turns = bool(
+            decision
+            and decision.mode == "recent"
+            and int(getattr(decision, "recent_turns", 0) or 0) > 0
+        )
+
+        if include_recent_turns and self.session_store and session_id and current_user_seq:
             try:
                 rows = await self.session_store.get_recent_messages(
                     session_id=session_id,

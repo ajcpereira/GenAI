@@ -166,7 +166,11 @@ class Responder:
         return None
 
     @staticmethod
-    def _deterministic_answer_from_steps(lang: str, steps_executed: List[Dict[str, Any]]) -> Optional[str]:
+    def _deterministic_answer_from_steps(
+        lang: str,
+        intent: str,
+        steps_executed: List[Dict[str, Any]],
+    ) -> Optional[str]:
         """Render a deterministic answer from simple tool outputs."""
         if not steps_executed:
             return None
@@ -191,12 +195,39 @@ class Responder:
             v = str(data.get("value")).strip()
             return v or None
 
-        # time.now style: data.iso + data.timezone
+        # time.now style: prefer explicit date/time fields when present.
+        tz = str(data.get("timezone") or "UTC")
+        date_str = data.get("date") if isinstance(data.get("date"), str) else None
+        time_str = data.get("time") if isinstance(data.get("time"), str) else None
+
+        # Decide whether the user asked for date vs time using the intent summary.
+        it = (intent or "").lower()
+        wants_date = any(k in it for k in ("data", "dia", "date", "today")) and not any(
+            k in it for k in ("hora", "horas", "time")
+        )
+
+        if wants_date and date_str and date_str.strip():
+            d = date_str.strip()
+            if lang.lower().startswith("pt"):
+                return f"A data atual no fuso horário {tz} é {d}."
+            return f"The current date in {tz} is {d}."
+
+        if time_str and time_str.strip():
+            t = time_str.strip()
+            if lang.lower().startswith("pt"):
+                return f"A hora atual no fuso horário {tz} é {t}."
+            return f"The current time in {tz} is {t}."
+
+        # Backward-compatible fallback: derive time from iso when only iso exists.
         if isinstance(data.get("iso"), str) and data.get("iso").strip():
             iso = data["iso"].strip()
-            tz = str(data.get("timezone") or "UTC")
             try:
                 dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                if wants_date:
+                    d_str = dt.strftime("%Y-%m-%d")
+                    if lang.lower().startswith("pt"):
+                        return f"A data atual no fuso horário {tz} é {d_str}."
+                    return f"The current date in {tz} is {d_str}."
                 t_str = dt.strftime("%H:%M:%S")
             except Exception:
                 if lang.lower().startswith("pt"):
@@ -231,7 +262,7 @@ class Responder:
 
         # Deterministic fast-path for simple tool results (format=text only).
         if fmt.lower() == "text":
-            det = self._deterministic_answer_from_steps(lang, steps_executed)
+            det = self._deterministic_answer_from_steps(lang, intent, steps_executed)
             if det is not None:
                 return det
 
@@ -308,7 +339,7 @@ class Responder:
 
         # 4) Enforce contract: if still JSON-like, return deterministic fallback.
         if fmt.lower() == "text":
-            det = self._deterministic_answer_from_steps(lang, steps_executed)
+            det = self._deterministic_answer_from_steps(lang, intent, steps_executed)
             if det is not None:
                 return det
             return SAFE_FALLBACK_PT if lang.lower().startswith("pt") else SAFE_FALLBACK_EN

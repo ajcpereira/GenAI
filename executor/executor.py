@@ -181,10 +181,38 @@ class Executor:
                         status_by_id[sid] = "failed"
                         continue
 
-                    out = await self.mcp.run_tool(cap, inputs, request_id=request_id)
-                    rec = {"id": sid, "status": "success", "output": {"data": out}, "error": None}
+                    # Persist raw tool I/O deterministically for auditability.
+                    # Output schema allows arbitrary object for "output".
+                    tool_call_obj = {"capability": cap, "inputs": inputs}
+
+                    if hasattr(self.mcp, "run_tool_with_trace"):
+                        traced = await self.mcp.run_tool_with_trace(cap, inputs, request_id=request_id)  # type: ignore[attr-defined]
+                        out = traced.get("response")
+                        http_trace = traced.get("trace")
+                        if traced.get("ok"):
+                            rec = {
+                                "id": sid,
+                                "status": "success",
+                                "output": {"tool_call": tool_call_obj, "http": http_trace, "data": out},
+                                "error": None,
+                            }
+                        else:
+                            rec = {
+                                "id": sid,
+                                "status": "failed",
+                                "output": {"tool_call": tool_call_obj, "http": http_trace, "data": out},
+                                "error": str(traced.get("error") or "tool_call_failed"),
+                            }
+                    else:
+                        out = await self.mcp.run_tool(cap, inputs, request_id=request_id)
+                        rec = {
+                            "id": sid,
+                            "status": "success",
+                            "output": {"tool_call": tool_call_obj, "http": None, "data": out},
+                            "error": None,
+                        }
                     executed.append(rec)
-                    status_by_id[sid] = "success"
+                    status_by_id[sid] = str(rec.get("status"))
 
                 elif stype == "compose":
                     context = self._compose_context(
