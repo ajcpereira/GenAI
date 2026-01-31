@@ -1,15 +1,80 @@
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "schemas": {
-    "Envelope": {
+    "AnswerPayload": {
+      "$id": "internal://schemas/AnswerPayload",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/Envelope",
-      "type": "object",
       "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "final_context": {
+          "additionalProperties": false,
+          "properties": {
+            "conversation_context": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "intent": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "steps_executed": {
+              "items": {
+                "$ref": "internal://schemas/StepExecution"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "intent",
+            "steps_executed"
+          ],
+          "type": "object"
+        },
+        "timings_ms": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
       "required": [
-        "metadata",
-        "payload"
+        "answer",
+        "final_context"
       ],
+      "type": "object"
+    },
+    "ContextPolicy": {
+      "$id": "internal://schemas/ContextPolicy",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "standalone",
+            "recent"
+          ],
+          "type": "string"
+        },
+        "recent_turns": {
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Envelope": {
+      "$id": "internal://schemas/Envelope",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "metadata": {
           "$ref": "internal://schemas/Metadata"
@@ -45,112 +110,201 @@
             },
             {
               "$ref": "internal://schemas/ExecutorInput"
+            },
+            {
+              "$ref": "internal://schemas/ContextPolicyOutput"
             }
           ]
         }
-      }
-    },
-    "UserRequestPayload": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/UserRequestPayload",
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
-        "message"
+        "metadata",
+        "payload"
       ],
-      "properties": {
-        "message": {
-          "type": "string",
-          "minLength": 1
-        },
-        "enabled_tools": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        }
-      }
+      "type": "object"
     },
     "ErrorPayload": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "internal://schemas/ErrorPayload",
-      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "required": [
-        "error"
-      ],
       "properties": {
+        "debug": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "error": {
-          "type": "object",
           "additionalProperties": false,
-          "required": [
-            "code",
-            "message"
-          ],
           "properties": {
             "code": {
-              "type": "string",
-              "minLength": 1
-            },
-            "message": {
-              "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "type": "string"
             },
             "detail": {
               "type": [
                 "object",
                 "null"
               ]
+            },
+            "message": {
+              "minLength": 1,
+              "type": "string"
             }
-          }
-        },
-        "debug": {
-          "type": [
-            "object",
-            "null"
+          },
+          "required": [
+            "code",
+            "message"
           ],
-          "additionalProperties": true
+          "type": "object"
         }
-      }
+      },
+      "required": [
+        "error"
+      ],
+      "type": "object"
+    },
+    "ExecutorInput": {
+      "$id": "internal://schemas/ExecutorInput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "planner_output": {
+          "$ref": "internal://schemas/PlannerOutput"
+        },
+        "request_context": {
+          "additionalProperties": false,
+          "properties": {
+            "request_id": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "user_message": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "user_message"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "planner_output",
+        "request_context"
+      ],
+      "type": "object"
+    },
+    "ExecutorResult": {
+      "$id": "internal://schemas/ExecutorResult",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "steps_executed": {
+          "items": {
+            "$ref": "internal://schemas/StepExecution"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "intent",
+        "steps_executed"
+      ],
+      "type": "object"
+    },
+    "FinalLLMInput": {
+      "$id": "internal://schemas/FinalLLMInput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "final_context": {
+          "additionalProperties": false,
+          "properties": {
+            "conversation_context": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "intent": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "steps_executed": {
+              "items": {
+                "$ref": "internal://schemas/StepExecution"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "intent",
+            "steps_executed"
+          ],
+          "type": "object"
+        },
+        "final_output_spec": {
+          "$ref": "internal://schemas/FinalOutputSpec"
+        }
+      },
+      "required": [
+        "final_context",
+        "final_output_spec"
+      ],
+      "type": "object"
+    },
+    "FinalOutputSpec": {
+      "$id": "internal://schemas/FinalOutputSpec",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "constraints": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "format": {
+          "enum": [
+            "text",
+            "markdown",
+            "json"
+          ],
+          "type": "string"
+        },
+        "tone": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "format",
+        "tone",
+        "constraints"
+      ],
+      "type": "object"
     },
     "Metadata": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "internal://schemas/Metadata",
-      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "required": [
-        "schema_version",
-        "message_type",
-        "request_id",
-        "timestamp",
-        "source"
-      ],
       "properties": {
-        "schema_version": {
-          "type": "string",
-          "pattern": "^\\d+\\.\\d+$"
-        },
         "message_type": {
           "type": "string"
         },
         "request_id": {
-          "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         },
-        "timestamp": {
-          "type": "string",
-          "minLength": 1
-        },
-        "source": {
-          "type": "string",
-          "minLength": 1
-        },
-        "user_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "schema_version": {
+          "pattern": "^\\d+\\.\\d+$",
+          "type": "string"
         },
         "session_id": {
           "type": [
@@ -158,238 +312,414 @@
             "null"
           ]
         },
+        "source": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "timestamp": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "timings_ms": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "type": "object"
+        },
         "trace": {
-          "type": "object",
           "additionalProperties": false,
-          "required": [
-            "trace_id",
-            "span_id"
-          ],
           "properties": {
-            "trace_id": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
             "span_id": {
               "type": [
                 "string",
                 "null"
               ]
+            },
+            "trace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
-          }
-        },
-        "timings_ms": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "minimum": 0
           },
-          "default": {}
+          "required": [
+            "trace_id",
+            "span_id"
+          ],
+          "type": "object"
+        },
+        "user_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
-      }
+      },
+      "required": [
+        "schema_version",
+        "message_type",
+        "request_id",
+        "timestamp",
+        "source"
+      ],
+      "type": "object"
     },
-    "ToolPolicy": {
+    "Plan": {
+      "$id": "internal://schemas/Plan",
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/ToolPolicy",
-      "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": {
-          "type": "string",
+        "steps": {
+          "items": {
+            "$ref": "internal://schemas/Step"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "strategy": {
           "enum": [
-            "allowlist",
-            "denylist"
-          ]
-        },
-        "allow": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
-        },
-        "deny": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          }
+            "sequential",
+            "parallel",
+            "hybrid"
+          ],
+          "type": "string"
         }
-      }
+      },
+      "required": [
+        "strategy",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "PlannerInput": {
+      "$id": "internal://schemas/PlannerInput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "constraints": {
+          "additionalProperties": false,
+          "properties": {
+            "budget": {
+              "additionalProperties": false,
+              "properties": {
+                "max_completion_tokens": {
+                  "minimum": 64,
+                  "type": "integer"
+                },
+                "max_prompt_tokens": {
+                  "minimum": 256,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "max_dependency_depth": {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_steps": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_tool_calls": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "max_steps",
+            "max_tool_calls",
+            "max_dependency_depth"
+          ],
+          "type": "object"
+        },
+        "context": {
+          "additionalProperties": false,
+          "properties": {
+            "memory_facts": {
+              "default": [],
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "confidence": {
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                  },
+                  "key": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "source": {
+                    "maxLength": 256,
+                    "type": "string"
+                  },
+                  "value": {
+                    "maxLength": 2000,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key",
+                  "value",
+                  "confidence"
+                ],
+                "type": "object"
+              },
+              "maxItems": 80,
+              "type": "array"
+            },
+            "recent_user_messages": {
+              "default": [],
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "request_id": {
+                    "minLength": 8,
+                    "type": "string"
+                  },
+                  "text": {
+                    "maxLength": 16000,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "maxItems": 12,
+              "type": "array"
+            },
+            "session_state": {
+              "additionalProperties": false,
+              "properties": {
+                "last_intent_type": {
+                  "enum": [
+                    "informational",
+                    "action",
+                    "creative",
+                    "other"
+                  ],
+                  "type": "string"
+                },
+                "last_tool_calls": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "capability": {
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "status": {
+                        "enum": [
+                          "success",
+                          "error",
+                          "skipped"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "capability",
+                      "status"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 20,
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "required": [
+            "recent_user_messages"
+          ],
+          "type": "object"
+        },
+        "replan_feedback": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "errors": {
+              "default": [],
+              "items": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "instruction": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "stage": {
+              "enum": [
+                "validator",
+                "executor",
+                "planner"
+              ],
+              "type": "string"
+            },
+            "warnings": {
+              "default": [],
+              "items": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array"
+            }
+          },
+          "required": [
+            "attempt",
+            "stage",
+            "instruction"
+          ],
+          "type": "object"
+        },
+        "request": {
+          "additionalProperties": false,
+          "properties": {
+            "current_user_message": {
+              "maxLength": 16000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "locale": {
+              "maxLength": 16,
+              "minLength": 2,
+              "type": "string"
+            },
+            "request_id": {
+              "minLength": 8,
+              "type": "string"
+            },
+            "session_id": {
+              "minLength": 8,
+              "type": "string"
+            },
+            "timestamp": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "session_id",
+            "timestamp",
+            "locale",
+            "current_user_message"
+          ],
+          "type": "object"
+        },
+        "schema_version": {
+          "pattern": "^\\d+\\.\\d+$",
+          "type": "string"
+        },
+        "tools": {
+          "additionalProperties": false,
+          "properties": {
+            "catalog": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "maxItems": 200,
+              "type": "array"
+            },
+            "policy": {
+              "$ref": "internal://schemas/ToolPolicy"
+            }
+          },
+          "required": [
+            "catalog",
+            "policy"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request",
+        "context",
+        "tools",
+        "constraints"
+      ],
+      "type": "object"
     },
     "PlannerOutput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "internal://schemas/PlannerOutput",
-      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "required": [
-        "user_intent",
-        "plan"
-      ],
       "properties": {
-        "user_intent": {
-          "$ref": "internal://schemas/UserIntent"
-        },
         "plan": {
           "$ref": "internal://schemas/Plan"
         },
+        "user_intent": {
+          "$ref": "internal://schemas/UserIntent"
+        },
         "violations": {
-          "type": "array",
+          "default": [],
           "items": {
-            "type": "object",
             "additionalProperties": false,
-            "required": [
-              "code",
-              "message"
-            ],
             "properties": {
               "code": {
-                "type": "string",
-                "minLength": 1
-              },
-              "message": {
-                "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "type": "string"
               },
               "detail": {
                 "type": [
                   "object",
                   "null"
                 ]
+              },
+              "message": {
+                "minLength": 1,
+                "type": "string"
               }
-            }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
           },
-          "default": []
-        }
-      }
-    },
-    "UserIntent": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/UserIntent",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "summary",
-        "type",
-        "confidence"
-      ],
-      "properties": {
-        "summary": {
-          "type": "string",
-          "minLength": 1
-        },
-        "type": {
-          "type": "string",
-          "enum": [
-            "informational",
-            "action",
-            "creative",
-            "other"
-          ]
-        },
-        "confidence": {
-          "type": "number",
-          "minimum": 0.0,
-          "maximum": 1.0
-        },
-        "locale": {
-          "type": "string",
-          "minLength": 2
-        }
-      }
-    },
-    "Plan": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/Plan",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "strategy",
-        "steps"
-      ],
-      "properties": {
-        "strategy": {
-          "type": "string",
-          "enum": [
-            "sequential",
-            "parallel",
-            "hybrid"
-          ]
-        },
-        "steps": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "$ref": "internal://schemas/Step"
-          }
-        }
-      }
-    },
-    "Step": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/Step",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "type",
-        "description",
-        "inputs",
-        "dependencies"
-      ],
-      "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$"
-        },
-        "type": {
-          "type": "string",
-          "enum": [
-            "tool_call",
-            "rag_query",
-            "compute",
-            "compose",
-            "other"
-          ]
-        },
-        "description": {
-          "type": "string",
-          "minLength": 1
-        },
-        "capability": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "agent": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "inputs": {
-          "type": "object"
-        },
-        "expected_output": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "dependencies": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[a-zA-Z0-9_\\-]+$"
-          }
-        },
-        "optional": {
-          "type": "boolean"
+          "type": "array"
         }
       },
+      "required": [
+        "user_intent",
+        "plan"
+      ],
+      "type": "object"
+    },
+    "Step": {
+      "$id": "internal://schemas/Step",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "allOf": [
         {
           "if": {
@@ -400,15 +730,15 @@
             }
           },
           "then": {
-            "required": [
-              "capability"
-            ],
             "properties": {
               "capability": {
-                "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "type": "string"
               }
-            }
+            },
+            "required": [
+              "capability"
+            ]
           }
         },
         {
@@ -427,89 +757,81 @@
             }
           }
         }
-      ]
-    },
-    "ValidatorOutput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/ValidatorOutput",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "validation",
-        "plan"
       ],
       "properties": {
-        "validation": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "is_valid",
-            "errors",
-            "warnings",
-            "missing_steps"
-          ],
-          "properties": {
-            "is_valid": {
-              "type": "boolean"
-            },
-            "errors": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "warnings": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "missing_steps": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          }
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
-        "plan": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "steps_ready"
+        "capability": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dependencies": {
+          "items": {
+            "pattern": "^[a-zA-Z0-9_\\-]+$",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "expected_output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "type": "string"
+        },
+        "inputs": {
+          "type": "object"
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "type": {
+          "enum": [
+            "tool_call",
+            "rag_query",
+            "compute",
+            "compose",
+            "other"
           ],
-          "properties": {
-            "steps_ready": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            }
-          }
+          "type": "string"
         }
-      }
-    },
-    "StepExecution": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/StepExecution",
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
         "id",
-        "status"
+        "type",
+        "description",
+        "inputs",
+        "dependencies"
       ],
+      "type": "object"
+    },
+    "StepExecution": {
+      "$id": "internal://schemas/StepExecution",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "status": {
-          "type": "string",
-          "enum": [
-            "success",
-            "skipped",
-            "failed"
+        "error": {
+          "type": [
+            "string",
+            "null"
           ]
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
         },
         "output": {
           "type": [
@@ -517,239 +839,266 @@
             "null"
           ]
         },
-        "error": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "ExecutorResult": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/ExecutorResult",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "intent",
-        "steps_executed"
-      ],
-      "properties": {
-        "intent": {
-          "type": "string",
-          "minLength": 1
-        },
-        "steps_executed": {
-          "type": "array",
-          "items": {
-            "$ref": "internal://schemas/StepExecution"
-          }
-        }
-      }
-    },
-    "FinalOutputSpec": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/FinalOutputSpec",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "format",
-        "tone",
-        "constraints"
-      ],
-      "properties": {
-        "format": {
-          "type": "string",
+        "status": {
           "enum": [
-            "text",
-            "markdown",
-            "json"
-          ]
-        },
-        "tone": {
-          "type": "string",
-          "minLength": 1
-        },
-        "constraints": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    "FinalLLMInput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/FinalLLMInput",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "final_context",
-        "final_output_spec"
-      ],
-      "properties": {
-        "final_context": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "intent",
-            "steps_executed"
+            "success",
+            "skipped",
+            "failed"
           ],
-          "properties": {
-            "intent": {
-              "type": "string",
-              "minLength": 1
-            },
-            "steps_executed": {
-              "type": "array",
-              "items": {
-                "$ref": "internal://schemas/StepExecution"
-              }
-            }
-          }
-        },
-        "final_output_spec": {
-          "$ref": "internal://schemas/FinalOutputSpec"
-        }
-      }
-    },
-    "AnswerPayload": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/AnswerPayload",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "answer",
-        "final_context"
-      ],
-      "properties": {
-        "answer": {
           "type": "string"
-        },
-        "final_context": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "intent",
-            "steps_executed"
-          ],
-          "properties": {
-            "intent": {
-              "type": "string",
-              "minLength": 1
-            },
-            "steps_executed": {
-              "type": "array",
-              "items": {
-                "$ref": "internal://schemas/StepExecution"
-              }
-            }
-          }
-        },
-        "timings_ms": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "default": {}
         }
-      }
-    },
-    "PlannerInput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/PlannerInput",
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
-        "user_message",
-        "allowed_tools"
+        "id",
+        "status"
       ],
+      "type": "object"
+    },
+    "ToolPolicy": {
+      "$id": "internal://schemas/ToolPolicy",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "user_message": {
-          "type": "string",
-          "minLength": 1
-        },
-        "allowed_tools": {
-          "type": "array",
+        "deny_tools": {
+          "default": [],
           "items": {
-            "type": "object",
-            "additionalProperties": true
-          }
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
         },
         "enabled_tools": {
-          "type": "array",
+          "default": [],
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "enabled_tools"
+      ],
+      "type": "object"
+    },
+    "UserIntent": {
+      "$id": "internal://schemas/UserIntent",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "context_policy": {
+          "$ref": "internal://schemas/ContextPolicy"
+        },
+        "locale": {
+          "minLength": 2,
+          "type": "string"
+        },
+        "summary": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "informational",
+            "action",
+            "creative",
+            "other"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "type",
+        "confidence"
+      ],
+      "type": "object"
+    },
+    "UserRequestPayload": {
+      "$id": "internal://schemas/UserRequestPayload",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "enabled_tools": {
+          "default": [],
           "items": {
             "type": "string"
           },
-          "default": []
+          "type": "array"
         },
-        "locale": {
-          "type": "string",
-          "minLength": 2
-        },
-        "replan_feedback": {
-          "type": "string",
-          "minLength": 1
+        "message": {
+          "minLength": 1,
+          "type": "string"
         }
-      }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
     },
     "ValidatorInput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "$id": "internal://schemas/ValidatorInput",
-      "type": "object",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "required": [
-        "planner_output",
-        "tool_policy"
-      ],
       "properties": {
+        "discovered_tools": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
         "planner_output": {
           "$ref": "internal://schemas/PlannerOutput"
         },
         "tool_policy": {
           "$ref": "internal://schemas/ToolPolicy"
-        },
-        "discovered_tools": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": true
-          }
         }
-      }
-    },
-    "ExecutorInput": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "$id": "internal://schemas/ExecutorInput",
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
         "planner_output",
-        "request_context"
+        "tool_policy"
       ],
+      "type": "object"
+    },
+    "ValidatorOutput": {
+      "$id": "internal://schemas/ValidatorOutput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "planner_output": {
-          "$ref": "internal://schemas/PlannerOutput"
+        "plan": {
+          "additionalProperties": false,
+          "properties": {
+            "steps_ready": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "steps_ready"
+          ],
+          "type": "object"
         },
-        "request_context": {
+        "validation": {
+          "additionalProperties": false,
+          "properties": {
+            "errors": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "is_valid": {
+              "type": "boolean"
+            },
+            "missing_steps": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "warnings": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "is_valid",
+            "errors",
+            "warnings",
+            "missing_steps"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "validation",
+        "plan"
+      ],
+      "type": "object"
+    },
+    "ContextPolicyOutput": {
+      "$id": "internal://schemas/ContextPolicyOutput",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "current_user_message": {
+          "type": "string"
+        },
+        "decision": {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "request_id",
-            "user_message"
-          ],
           "properties": {
-            "request_id": {
+            "mode": {
               "type": "string",
-              "minLength": 1
+              "enum": [
+                "standalone",
+                "recent"
+              ]
             },
-            "user_message": {
-              "type": "string",
-              "minLength": 1
+            "recent_turns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
             }
-          }
+          },
+          "required": [
+            "mode",
+            "recent_turns",
+            "confidence"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
         }
+      },
+      "required": [
+        "current_user_message",
+        "decision",
+        "error"
+      ]
+    }
+  },
+  "validator_rules": {
+    "plan_validator": {
+      "about": "Structural validation is enforced by JSON Schema. Semantic validation is enforced deterministically by PlanValidator using this catalog (validator_rules.plan_validator).",
+      "error_prefix": "PV",
+      "templates": {
+        "001": "Plan has no steps.",
+        "002": "Plan exceeds max_steps={max_steps} (got {got}).",
+        "003": "Plan exceeds max_tool_calls={max_tool_calls} (got {got}).",
+        "004": "Step without 'id'.",
+        "005": "Duplicate step id: {id}",
+        "006": "Step '{id}' depends on missing step '{dep}'.",
+        "007": "Step '{id}' depends on itself.",
+        "008": "tool_call step '{id}' missing capability.",
+        "009": "tool_call step '{id}' uses disabled tool '{tool}' by tool_policy.",
+        "010": "tool_call step '{id}' cannot be optional under current policy.",
+        "011": "Plan dependency cycle detected: {cycle}",
+        "012": "tool_call step '{id}' references unknown tool '{tool}' (not in MCP)."
+      },
+      "warning_prefix": "PVW",
+      "warning_templates": {
+        "001": "Could not verify MCP tools (discovery failed): {error}"
       }
     }
   }

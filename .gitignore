@@ -1,3 +1,12 @@
+# Ignore folders named logs or log anywhere
 logs/
-**/__pycache__/
+log/
+
+# Ignore Python cache directories
 __pycache__/
+
+# Ignore all .pyc files anywhere
+*.pyc
+
+# Ignore all .log files anywhere
+*.log

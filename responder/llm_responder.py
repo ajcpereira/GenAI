@@ -1,4 +1,3 @@
-# responder/llm_responder.py
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -6,21 +5,17 @@ logger = logging.getLogger("genai.responder")
 
 
 class LLMResponder:
-    """
-    Interface expected by main.py:
-        responder = LLMResponder(cfg.get('responder', {}))
+    """Legacy responder interface (kept for compatibility).
 
-    Interface expected by orchestrator:
-        await responder.generate(user_message=..., intent=..., steps_executed=...) -> AnswerPayload
+    Current system uses responder.Responder as the final LLM stage, but some
+    external scripts may still import this class.
     """
 
     def __init__(self, cfg: Optional[Dict[str, Any]] = None):
         self.cfg = cfg or {}
-
-        # v1 stable: responder is "local" (no upstream call). Keep placeholders for future.
-        self.model_name = self.cfg.get("model", None)
-        self.base_url = self.cfg.get("base_url", None)
-        self.api_key = self.cfg.get("api_key", None)
+        self.model_name = self.cfg.get("model")
+        self.base_url = self.cfg.get("base_url")
+        self.api_key = self.cfg.get("api_key")
 
         logger.info(
             "responder_initialized",
@@ -38,27 +33,12 @@ class LLMResponder:
         intent: Dict[str, Any],
         steps_executed: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """
-        Returns AnswerPayload per internal-json.json:
-          {
-            "answer": "...",
-            "final_context": {
-              "intent": "<string>",
-              "steps_executed": [StepExecution...]
-            }
-          }
-        """
-        intent_summary = str(intent.get("summary") or "").strip()
-        if not intent_summary:
-            intent_summary = str(user_message or "").strip() or "unknown"
-
-        # v1 stable answer (no vLLM call yet)
+        intent_summary = str(intent.get("summary") or "").strip() or str(user_message or "").strip() or "unknown"
         answer = (
             f"Pedido: {user_message}\n"
             f"Intenção: {intent_summary}\n"
             f"Passos executados: {len(steps_executed)}"
         )
-
         return {
             "answer": answer,
             "final_context": {

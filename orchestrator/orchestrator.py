@@ -13,12 +13,19 @@ from validator.output_validator import OutputValidator
 from utils.common import now_iso, validate_json
 from utils.lang import detect_language
 
+from orchestrator.session_store import SessionStore
+from orchestrator.context_manager import ContextManager
+from orchestrator.context_policy_classifier import ContextPolicyClassifier, ContextPolicyDecision
+
 logger = logging.getLogger("genai.orchestrator")
+
+SAFE_FALLBACK_PT = "Não tenho informação segura e precisa para responder"
+SAFE_FALLBACK_EN = "I don't have reliable, precise information to answer"
 
 
 def _sanitize_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {
-        "schema_version": meta.get("schema_version", "1.1"),
+        "schema_version": meta.get("schema_version", "1.2"),
         "message_type": meta.get("message_type", "internal"),
         "request_id": meta.get("request_id", "unknown"),
         "timestamp": meta.get("timestamp", now_iso()),
@@ -53,6 +60,11 @@ class Orchestrator:
         max_tool_calls: int = 15,
         reject_unknown_enabled_tools: bool = True,
         max_replans: int = 2,
+        # NEW (major): persistence + context
+        session_store: Optional[SessionStore] = None,
+        storage_cfg: Optional[Dict[str, Any]] = None,
+        context_manager: Optional[ContextManager] = None,
+        context_policy_classifier: Optional[ContextPolicyClassifier] = None,
     ):
         self.planner = planner
         self.executor = executor
@@ -64,30 +76,80 @@ class Orchestrator:
         self.reject_unknown_enabled_tools = bool(reject_unknown_enabled_tools)
         self.max_replans = int(max_replans)
 
+        self.session_store = session_store
+        self.storage_cfg = storage_cfg or {}
+        self.context_manager = context_manager
+        self.context_policy_classifier = context_policy_classifier
+
+        self.persist_stages = set(self.storage_cfg.get("persist_stages") or [])
+        self.max_envelope_bytes = int(self.storage_cfg.get("max_envelope_bytes", 1048576))
+
         self.bundle = contract_bundle
         self.schemas = contract_bundle["schemas"]
+
+        # Fail-fast: required schemas must exist in the contract bundle
+        required_schema_names = [
+            "Envelope",
+            "Metadata",
+            "UserRequestPayload",
+            "PlannerInput",
+            "PlannerOutput",
+            "ValidatorInput",
+            "ValidatorOutput",
+            "ExecutorInput",
+            "ExecutorResult",
+            "FinalLLMInput",
+            "AnswerPayload",
+            "ErrorPayload",
+        ]
+        missing = [n for n in required_schema_names if n not in self.schemas]
+        if missing:
+            raise RuntimeError(f"contract_bundle_missing_schemas: {missing}")
 
         self.envelope_schema = self.schemas["Envelope"]
         self.metadata_schema = self.schemas["Metadata"]
         self.user_request_schema = self.schemas["UserRequestPayload"]
 
-        self.planner_input_schema = self.schemas.get("PlannerInput")
+        self.planner_input_schema = self.schemas["PlannerInput"]
         self.planner_output_schema = self.schemas["PlannerOutput"]
-        self.validator_input_schema = self.schemas.get("ValidatorInput")
+        self.validator_input_schema = self.schemas["ValidatorInput"]
         self.validator_output_schema = self.schemas["ValidatorOutput"]
-        self.executor_input_schema = self.schemas.get("ExecutorInput")
+        self.executor_input_schema = self.schemas["ExecutorInput"]
         self.executor_result_schema = self.schemas["ExecutorResult"]
         self.final_llm_input_schema = self.schemas["FinalLLMInput"]
         self.answer_payload_schema = self.schemas["AnswerPayload"]
         self.error_payload_schema = self.schemas["ErrorPayload"]
+
+        # Optional: schema for context policy observability
+        self.context_policy_output_schema = self.schemas.get("ContextPolicyOutput")
+        if self.persist_stages:
+            # If stage allow-list is enabled, include this new stage to avoid silent drops.
+            self.persist_stages.add("context_policy_output")
 
         self.plan_validator = PlanValidator(
             getattr(self.executor, "mcp", None),
             max_steps=self.max_steps,
             max_tool_calls=self.max_tool_calls,
             allow_optional_tool_calls=False,
+            rules=(contract_bundle.get("validator_rules") or {}).get("plan_validator") or {},
         )
         self.output_validator = OutputValidator(contract_bundle)
+
+    @staticmethod
+    def _build_validation_failure_answer(*, locale: str, errors: List[str], enabled_tools: List[str]) -> str:
+        """Deterministic user-facing message for plan validation failures.
+
+        Security/UX policy: never reveal tools, permissions, internal codes, or validation details.
+        """
+        loc_pt = str(locale).lower().startswith("pt")
+        return SAFE_FALLBACK_PT if loc_pt else SAFE_FALLBACK_EN
+
+    async def _persist(self, stage: str, env: Dict[str, Any]) -> None:
+        if not self.session_store:
+            return
+        if self.persist_stages and stage not in self.persist_stages:
+            return
+        await self.session_store.persist_envelope(stage=stage, envelope=env, max_bytes=self.max_envelope_bytes)
 
     def _make_envelope(
         self,
@@ -179,9 +241,9 @@ class Orchestrator:
         return {
             "is_valid": len(unknown) == 0,
             "requested": enabled,
-            "matched": matched,         # canonical matches
+            "matched": matched,  # canonical matches
             "unknown": unknown,
-            "available": available,     # canonical list
+            "available": available,  # canonical list
             "suggestions": suggestions,
         }
 
@@ -211,26 +273,14 @@ class Orchestrator:
                 return s
         return None
 
-    @staticmethod
-    def _cap_plan_safety(planner_payload: Dict[str, Any], max_steps: int, max_tool_calls: int) -> Dict[str, Any]:
-        """
-        Defense-in-depth: cap steps/tool_calls at orchestrator boundary even if planner emits more.
-        """
-        po = dict(planner_payload or {})
-        plan = po.get("plan") or {}
-        steps = list(plan.get("steps") or [])
-        if len(steps) > max_steps:
-            steps = steps[:max_steps]
-        tool_ids = [s.get("id") for s in steps if s.get("type") == "tool_call"]
-        if len(tool_ids) > max_tool_calls:
-            keep = set(tool_ids[:max_tool_calls])
-            steps = [s for s in steps if not (s.get("type") == "tool_call" and s.get("id") not in keep)]
-        plan["steps"] = steps
-        po["plan"] = plan
-        return po
+
 
     async def handle_envelope(self, request_envelope: Dict[str, Any]) -> Dict[str, Any]:
         t_request0 = time.perf_counter()
+
+        # Request-scoped timings propagated across envelopes.
+        # Always initialise deterministically to avoid NameError regressions.
+        timings: Dict[str, int] = dict((request_envelope.get("metadata") or {}).get("timings_ms") or {})
 
         validate_json(self.envelope_schema, request_envelope, bundle=self.bundle)
         validate_json(self.metadata_schema, request_envelope["metadata"], bundle=self.bundle)
@@ -238,8 +288,11 @@ class Orchestrator:
 
         base_metadata = request_envelope["metadata"]
         request_id = str(base_metadata.get("request_id") or "unknown")
+        session_id = str(base_metadata.get("session_id") or "")
+        user_id = base_metadata.get("user_id")
 
         self._log_envelope("request", request_envelope)
+        await self._persist("request", request_envelope)
 
         payload = request_envelope["payload"] or {}
         user_message = str(payload.get("message") or "").strip()
@@ -247,86 +300,207 @@ class Orchestrator:
 
         locale = detect_language(user_message, default="pt").code
 
-        # Discover tools
-        t0 = time.perf_counter()
-        discovered_tools = await self._discover_tools(request_id=request_id)
-        t_discovery = int((time.perf_counter() - t0) * 1000)
+        # Persistence: ensure session exists + append current user message.
+        current_user_seq = 0
+        if self.session_store and session_id:
+            await self.session_store.touch_session(session_id=session_id, user_id=user_id, meta={"locale": locale})
+            current_user_seq = await self.session_store.append_message(
+                session_id=session_id, user_id=user_id, request_id=request_id, role="user", content=user_message
+            )
 
-        timings: Dict[str, int] = {"mcp_discovery_ms": t_discovery}
 
-        # Validate enabled_tools for UI (fail-fast)
+        # Build conversation context (major feature)
+        # Decide whether to include recent conversation context (standalone vs recent)
+        decision: ContextPolicyDecision | None = None
+        ctx_error: Optional[str] = None
+        ctx_debug = "CONTEXT_POLICY: standalone"
+        conversation_context = ""
+
+        if self.context_policy_classifier is not None:
+            try:
+                decision = await self.context_policy_classifier.classify(user_message)
+            except Exception as e:
+                decision = None
+                ctx_error = f"classifier_error: {type(e).__name__}"
+
+        if decision is None:
+            # If classifier is missing or failed, default to standalone deterministically.
+            ctx_debug = "CONTEXT_POLICY: fallback(standalone)"
+            if ctx_error is None:
+                ctx_error = "classifier_unavailable"
+            decision = ContextPolicyDecision(mode="standalone", recent_turns=0, confidence=0.0)
+        elif decision.mode == "recent":
+            if self.context_manager is None:
+                # Deterministic guardrail: don't crash if context manager isn't wired.
+                ctx_debug = "CONTEXT_POLICY: recent_requested_but_context_manager_missing -> fallback(standalone)"
+                ctx_error = "context_manager_missing"
+                decision = ContextPolicyDecision(mode="standalone", recent_turns=0, confidence=decision.confidence)
+            else:
+                try:
+                    conversation_context, ctx_debug = await self.context_manager.build_context(
+                        session_id=session_id,
+                        max_turns=decision.recent_turns,
+                    )
+                except Exception as e:
+                    conversation_context = ""
+                    ctx_debug = "CONTEXT_POLICY: build_context_failed -> fallback(standalone)"
+                    ctx_error = f"build_context_error: {type(e).__name__}"
+                    decision = ContextPolicyDecision(mode="standalone", recent_turns=0, confidence=decision.confidence)
+        else:
+            conversation_context = ""
+            ctx_debug = "CONTEXT_POLICY: standalone"
+
+        # Persist decision envelope for traceability (schema-driven; never breaks request flow)
+        if self.context_policy_output_schema is not None:
+            try:
+                ctx_out_env = self._make_envelope(
+                    base_metadata,
+                    "context_policy_output",
+                    "orchestrator",
+                    {
+                        "current_user_message": user_message,
+                        "decision": {
+                            "mode": decision.mode,
+                            "recent_turns": decision.recent_turns,
+                            "confidence": decision.confidence,
+                        },
+                        "error": ctx_error,
+                    },
+                    self.context_policy_output_schema,
+                )
+                self._log_envelope("context_policy_output", ctx_out_env)
+                await self._persist("context_policy_output", ctx_out_env)
+            except Exception:
+                # Never crash request flow because of observability.
+                pass
+
+        # ----------------
+        # Tool discovery + tool policy
+        # ----------------
+        discovered_tools: List[Dict[str, Any]] = await self._discover_tools(request_id=request_id)
         enabled_validation = self._validate_enabled_tools(enabled_tools, discovered_tools)
-        if self.reject_unknown_enabled_tools and not enabled_validation["is_valid"]:
+
+        if self.reject_unknown_enabled_tools and (not enabled_validation.get("is_valid", True)):
+            # Controlled, schema-valid error response. Never crash.
             err_payload = {
                 "error": {
-                    "code": "TOOL_NOT_AVAILABLE",
-                    "message": "One or more requested tools are not available.",
-                    "detail": enabled_validation,
+                    "code": "INVALID_ENABLED_TOOLS",
+                    "message": "One or more enabled_tools are not available.",
+                    "detail": {
+                        "unknown": enabled_validation.get("unknown") or [],
+                        "available": enabled_validation.get("available") or [],
+                        "suggestions": enabled_validation.get("suggestions") or {},
+                    },
                 },
-                "debug": {"stage": "orchestrator", "timings_ms": timings},
+                "debug": {"stage": "orchestrator"},
             }
-            err_env = self._make_envelope(base_metadata, "error", "orchestrator", err_payload, self.error_payload_schema, timings_ms=timings)
-            self._log_envelope("error", err_env)
-            return err_env
+            error_env = self._make_envelope(base_metadata, "error", "orchestrator", err_payload, self.error_payload_schema)
+            self._log_envelope("response", error_env)
+            await self._persist("response", error_env)
+            return error_env
 
-        allowed_tools = self._filter_tools_by_enabled(discovered_tools, enabled_tools)
+        # Canonical tool allow-list (exact names from discovery).
+        enabled_canonical: List[str] = list(enabled_validation.get("matched") or [])
+        allowed_tools: List[Dict[str, Any]] = self._filter_tools_by_enabled(discovered_tools, enabled_canonical)
 
-        # Build tool policy (runtime allowlist) to constrain planner + validator
-        # ToolPolicy.allow must be a list of strings (capability names), not tool objects.
-        tool_policy = {
-            "mode": "allowlist",
-            "allow": [t["name"] for t in allowed_tools],
-        }
+        tool_policy: Dict[str, Any] = {"enabled_tools": enabled_canonical, "deny_tools": []}
 
-        # Planner input payload/envelope
+        # ----------------
+        # Planner input payload (schema-driven)
+        # ----------------
+        recent_user_messages: List[Dict[str, Any]] = []
+        if self.session_store and session_id and current_user_seq:
+            try:
+                rows = await self.session_store.get_recent_messages(
+                    session_id=session_id,
+                    before_seq=current_user_seq,
+                    limit=12,
+                )
+                # Keep only user messages; oldest -> newest.
+                rows = [r for r in rows if getattr(r, "role", "") == "user"]
+                rows = list(reversed(rows))
+                for r in rows:
+                    item: Dict[str, Any] = {"id": str(getattr(r, "seq")), "text": str(getattr(r, "content"))}
+                    rid = getattr(r, "request_id", None)
+                    if rid:
+                        item["request_id"] = str(rid)
+                    recent_user_messages.append(item)
+            except Exception:
+                # Context is optional; schema still requires the array key.
+                recent_user_messages = []
+
+        # Constraints should come from config-driven rule engine; no heuristics.
+        max_dependency_depth = int(getattr(getattr(self.planner, "rules", None), "max_dependency_depth", 15))
+
         planner_input_payload: Dict[str, Any] = {
-            "user_message": user_message,
-            "allowed_tools": allowed_tools,
-            "enabled_tools": enabled_tools,
-            "locale": locale,
+            "schema_version": str(base_metadata.get("schema_version") or "1.2"),
+            "request": {
+                "request_id": request_id,
+                "session_id": session_id or "unknown_session",
+                "timestamp": now_iso(),
+                "locale": str(locale),
+                "current_user_message": user_message,
+            },
+            "context": {
+                "recent_user_messages": recent_user_messages,
+                "memory_facts": [],
+            },
+            "tools": {
+                "catalog": allowed_tools,
+                "policy": tool_policy,
+            },
+            "constraints": {
+                "max_steps": self.max_steps,
+                "max_tool_calls": self.max_tool_calls,
+                "max_dependency_depth": max_dependency_depth,
+            },
         }
-        if self.planner_input_schema:
-            validate_json(self.planner_input_schema, planner_input_payload, bundle=self.bundle)
+
         planner_in_env = self._make_envelope(
-            base_metadata, "planner_input", "orchestrator", planner_input_payload,
-            self.planner_input_schema or self.planner_output_schema, timings_ms=timings,
+            base_metadata,
+            "planner_input",
+            "orchestrator",
+            planner_input_payload,
+            self.planner_input_schema or self.planner_output_schema,
+            timings_ms=timings,
         )
         self._log_envelope("planner_input", planner_in_env)
+        await self._persist("planner_input", planner_in_env)
 
+        # Planner -> Validator -> Executor: single unified replan loop.
+        # We replan deterministically when:
+        #   - plan validation fails (schema/tool_policy/tool input_schema)
+        #   - a required tool execution fails (tool backend error / invalid tool inputs)
+        # This keeps the orchestrator free of heuristics: it never changes the plan itself;
+        # it only asks the Planner to replan with explicit feedback.
 
-        # Planner + Validator (with replan loop)
-        last_validation_detail: Optional[Dict[str, Any]] = None
-        planner_payload: Dict[str, Any] = {}
-        validator_payload: Dict[str, Any] = {}
+        last_feedback: Optional[Dict[str, Any]] = None
+        planner_env: Optional[Dict[str, Any]] = None
+        exec_env: Optional[Dict[str, Any]] = None
+        final_context_obj: Optional[Dict[str, Any]] = None
 
         for attempt in range(1, self.max_replans + 2):
+            # ----------------
             # Planner
+            # ----------------
             t0 = time.perf_counter()
-            if attempt > 1 and last_validation_detail:
-                # Provide compact feedback to the planner (schema-approved via PlannerInput.replan_feedback)
-                errs = (last_validation_detail.get("validation") or {}).get("errors") or []
-                warns = (last_validation_detail.get("validation") or {}).get("warnings") or []
-                feedback = {
-                    "attempt": attempt,
-                    "errors": errs,
-                    "warnings": warns,
-                    "rule": "tool_call steps MUST include non-empty capability equal to an allowed tool name",
-                }
-                planner_in_env["payload"]["replan_feedback"] = json.dumps(feedback, ensure_ascii=False)
+            if last_feedback:
+                planner_in_env["payload"]["replan_feedback"] = last_feedback
             else:
                 planner_in_env["payload"].pop("replan_feedback", None)
 
             planner_payload = await self.planner.build_plan(planner_in_env["payload"])
             timings["planner_ms"] = int((time.perf_counter() - t0) * 1000)
 
-            planner_payload = self._cap_plan_safety(planner_payload, self.max_steps, self.max_tool_calls)
-
             planner_env = self._make_envelope(
                 base_metadata, "planner_output", "planner", planner_payload, self.planner_output_schema, timings_ms=timings
             )
             self._log_envelope("planner_output", planner_env)
+            await self._persist("planner_output", planner_env)
 
-            # Validator input envelope
+            # ----------------
+            # Validator
+            # ----------------
             validator_input_payload = {
                 "planner_output": planner_payload,
                 "tool_policy": tool_policy,
@@ -343,8 +517,8 @@ class Orchestrator:
                 timings_ms=timings,
             )
             self._log_envelope("validator_input", validator_in_env)
+            await self._persist("validator_input", validator_in_env)
 
-            # Validator
             t0 = time.perf_counter()
             try:
                 validator_payload = await self.plan_validator.validate(validator_in_env["payload"])
@@ -353,12 +527,12 @@ class Orchestrator:
                     base_metadata, "validator_output", "validator", validator_payload, self.validator_output_schema, timings_ms=timings
                 )
                 self._log_envelope("validator_output", validator_env)
-                last_validation_detail = None
-                break  # valid plan
+                await self._persist("validator_output", validator_env)
             except Exception as e:
                 timings["validator_ms"] = int((time.perf_counter() - t0) * 1000)
                 detail = getattr(e, "detail", None) or {}
-                last_validation_detail = detail
+                errors = (detail.get("validation") or {}).get("errors") or []
+                warnings = (detail.get("validation") or {}).get("warnings") or []
 
                 logger.warning(
                     "replan_required",
@@ -366,52 +540,161 @@ class Orchestrator:
                         "request_id": base_metadata.get("request_id"),
                         "attempt": attempt,
                         "max_replans": self.max_replans,
-                        "validation_errors": (detail.get("validation") or {}).get("errors") or [],
+                        "validation_errors": errors,
                     },
                 )
 
+                # If we are out of replans, do not crash the user with a validator error.
+                # Industry-grade UX: provide a deterministic, actionable response.
+                if attempt > self.max_replans:
+                    answer_text = self._build_validation_failure_answer(locale=locale, errors=errors, enabled_tools=enabled_tools)
+                    answer_payload = {
+                        "answer": answer_text,
+                        "final_context": {
+                            "intent": "invalid_plan",
+                            "steps_executed": [],
+                            **({"conversation_context": conversation_context} if conversation_context else {}),
+                        },
+                        "timings_ms": timings,
+                    }
+                    validate_json(self.answer_payload_schema, answer_payload, bundle=self.bundle)
+                    response_env = self._make_envelope(
+                        base_metadata, "response", "orchestrator", answer_payload, self.answer_payload_schema, timings_ms=timings
+                    )
+                    self._log_envelope("response", response_env)
+                    await self._persist("response", response_env)
+                    if self.session_store and session_id and current_user_seq:
+                        await self.session_store.append_message(
+                            session_id=session_id,
+                            user_id=user_id,
+                            request_id=request_id,
+                            role="assistant",
+                            content=answer_payload["answer"],
+                        )
+                    return response_env
+
+                last_feedback = {
+                    "attempt": attempt + 1,
+                    "stage": "validator",
+                    "errors": errors,
+                    "warnings": warnings,
+                    "instruction": "Return a corrected PlannerOutput plan that passes validation. If tools are not allowed/available, use a single compose step.",
+                }
+                continue
+
+            # ----------------
+            # Confidence gating (no-tools path)
+            # ----------------
+            try:
+                conf = float((planner_payload.get("user_intent") or {}).get("confidence") or 0.0)
+            except Exception:
+                conf = 0.0
+            has_tool_calls = self._plan_has_tool_calls(planner_payload)
+            if (not has_tool_calls) and (conf < self.confidence_threshold):
+                msg = SAFE_FALLBACK_PT if str(locale).lower().startswith("pt") else SAFE_FALLBACK_EN
+                answer_payload = {
+                    "answer": msg,
+                    "final_context": {
+                        "intent": "insufficient_information",
+                        "steps_executed": [],
+                        **({"conversation_context": conversation_context} if conversation_context else {}),
+                    },
+                    "timings_ms": timings,
+                }
+                validate_json(self.answer_payload_schema, answer_payload, bundle=self.bundle)
+                response_env = self._make_envelope(
+                    base_metadata, "response", "orchestrator", answer_payload, self.answer_payload_schema, timings_ms=timings
+                )
+                self._log_envelope("response", response_env)
+                await self._persist("response", response_env)
+                if self.session_store and session_id and current_user_seq:
+                    await self.session_store.append_message(
+                        session_id=session_id,
+                        user_id=user_id,
+                        request_id=request_id,
+                        role="assistant",
+                        content=answer_payload["answer"],
+                    )
+                return response_env
+
+            # ----------------
+            # Executor
+            # ----------------
+            executor_input_payload = {
+                "planner_output": planner_payload,
+                "request_context": {"request_id": request_id, "user_message": user_message},
+            }
+            if self.executor_input_schema:
+                validate_json(self.executor_input_schema, executor_input_payload, bundle=self.bundle)
+            executor_in_env = self._make_envelope(
+                base_metadata,
+                "executor_input",
+                "orchestrator",
+                executor_input_payload,
+                self.executor_input_schema or self.executor_result_schema,
+                timings_ms=timings,
+            )
+            self._log_envelope("executor_input", executor_in_env)
+            await self._persist("executor_input", executor_in_env)
+
+            t0 = time.perf_counter()
+            exec_payload = await self.executor.execute(executor_in_env["payload"])
+            timings["executor_ms"] = int((time.perf_counter() - t0) * 1000)
+
+            exec_env = self._make_envelope(
+                base_metadata, "executor_result", "executor", exec_payload, self.executor_result_schema, timings_ms=timings
+            )
+            self._log_envelope("executor_result", exec_env)
+            await self._persist("executor_result", exec_env)
+
+            self.output_validator.validate(exec_env["payload"])
+
+            failed_tool = self._first_failed_tool_step(planner_payload, exec_env["payload"])
+            if failed_tool is not None:
+                # Ask the planner to replan with execution feedback (industry standard: automatic recovery path).
                 if attempt <= self.max_replans:
+                    last_feedback = {
+                        "attempt": attempt + 1,
+                        "stage": "executor",
+                        "failed_step": failed_tool.get("id"),
+                        "tool": (failed_tool.get("capability") or ""),
+                        "error": (failed_tool.get("error") or ""),
+                        "instruction": "Replan. If the request can be answered without tools, produce a single compose step. If a tool is required, keep tool_call but fix inputs to match the tool input_schema exactly.",
+                    }
                     continue
 
-                err_payload = {
-                    "error": {"code": "INVALID_PLAN", "message": str(e), "detail": detail},
-                    "debug": {"stage": "validator", "timings_ms": timings},
+                err_msg = str(failed_tool.get("error") or "Tool execution failed")
+                answer_payload = {
+                    "answer": SAFE_FALLBACK_PT if str(locale).lower().startswith("pt") else SAFE_FALLBACK_EN,
+                    "final_context": {
+                        "intent": "tool_execution_failed",
+                        "steps_executed": exec_env["payload"]["steps_executed"],
+                        **({"conversation_context": conversation_context} if conversation_context else {}),
+                    },
+                    "timings_ms": timings,
                 }
-                err_env = self._make_envelope(base_metadata, "error", "validator", err_payload, self.error_payload_schema, timings_ms=timings)
-                self._log_envelope("error", err_env)
-                return err_env
-# ExecutorInput
-        executor_input_payload = {"planner_output": planner_env["payload"], "request_context": {"request_id": request_id, "user_message": user_message}}
-        if self.executor_input_schema:
-            validate_json(self.executor_input_schema, executor_input_payload, bundle=self.bundle)
-        executor_in_env = self._make_envelope(
-            base_metadata, "executor_input", "orchestrator", executor_input_payload, self.executor_input_schema or self.executor_result_schema, timings_ms=timings
-        )
-        self._log_envelope("executor_input", executor_in_env)
+                validate_json(self.answer_payload_schema, answer_payload, bundle=self.bundle)
+                response_env = self._make_envelope(
+                    base_metadata, "response", "orchestrator", answer_payload, self.answer_payload_schema, timings_ms=timings
+                )
+                self._log_envelope("response", response_env)
+                await self._persist("response", response_env)
+                if self.session_store and session_id and current_user_seq:
+                    await self.session_store.append_message(
+                        session_id=session_id,
+                        user_id=user_id,
+                        request_id=request_id,
+                        role="assistant",
+                        content=answer_payload["answer"],
+                    )
+                return response_env
 
-        # Executor
-        t0 = time.perf_counter()
-        exec_payload = await self.executor.execute(executor_in_env["payload"])
-        timings["executor_ms"] = int((time.perf_counter() - t0) * 1000)
+            # Success path: break out and proceed to final LLM responder.
+            break
 
-        exec_env = self._make_envelope(base_metadata, "executor_result", "executor", exec_payload, self.executor_result_schema, timings_ms=timings)
-        self._log_envelope("executor_result", exec_env)
-
-        self.output_validator.validate(exec_env["payload"])
-
-        # Hard-failure policy: if a planned tool_call failed, respond with failure
-        failed_tool = self._first_failed_tool_step(planner_env["payload"], exec_env["payload"])
-        if failed_tool is not None:
-            err_msg = str(failed_tool.get("error") or "Tool execution failed")
-            answer_payload = {
-                "answer": f"Falha ao executar uma ferramenta necessária (step '{failed_tool.get('id')}'): {err_msg}",
-                "final_context": {"intent": "tool_execution_failed", "steps_executed": exec_env["payload"]["steps_executed"]},
-                "timings_ms": timings,
-            }
-            validate_json(self.answer_payload_schema, answer_payload, bundle=self.bundle)
-            response_env = self._make_envelope(base_metadata, "response", "orchestrator", answer_payload, self.answer_payload_schema, timings_ms=timings)
-            self._log_envelope("response", response_env)
-            return response_env
+        # At this point, planner_env and exec_env MUST be available.
+        if planner_env is None or exec_env is None:
+            raise RuntimeError("orchestrator_invariant_failed: missing planner_env/exec_env")
 
         # Derive composed context from compose step output (if present)
         composed_context = None
@@ -422,14 +705,19 @@ class Orchestrator:
         intent_summary = str((planner_env["payload"].get("user_intent") or {}).get("summary") or "")
         final_intent = composed_context or intent_summary or "final_response"
 
+        final_context_obj: Dict[str, Any] = {"intent": final_intent, "steps_executed": exec_env["payload"]["steps_executed"]}
+        if conversation_context:
+            final_context_obj["conversation_context"] = conversation_context
+
         final_llm_input = {
-            "final_context": {"intent": final_intent, "steps_executed": exec_env["payload"]["steps_executed"]},
+            "final_context": final_context_obj,
             "final_output_spec": {"format": "text", "tone": "enterprise", "constraints": ["concise", "accurate", f"language:{locale}"]},
         }
         validate_json(self.final_llm_input_schema, final_llm_input, bundle=self.bundle)
 
         final_llm_env = self._make_envelope(base_metadata, "final_llm_input", "orchestrator", final_llm_input, self.final_llm_input_schema, timings_ms=timings)
         self._log_envelope("final_llm_input", final_llm_env)
+        await self._persist("final_llm_input", final_llm_env)
 
         # Responder
         t0 = time.perf_counter()
@@ -437,13 +725,31 @@ class Orchestrator:
         timings["responder_ms"] = int((time.perf_counter() - t0) * 1000)
         timings["total_ms"] = int((time.perf_counter() - t_request0) * 1000)
 
+        # Final confidence gate: enforce uniform safe fallback when confidence is below threshold.
+        try:
+            est = getattr(self.responder, "estimate_confidence", None)
+            final_conf = float(await est(final_llm_env["payload"], answer_text)) if est else 1.0
+        except Exception:
+            final_conf = 0.0
+
+        if final_conf < float(self.confidence_threshold):
+            answer_text = SAFE_FALLBACK_PT if str(locale).lower().startswith("pt") else SAFE_FALLBACK_EN
+
         answer_payload = {
             "answer": answer_text,
-            "final_context": final_llm_input["final_context"],
+            "final_context": final_context_obj,
             "timings_ms": timings,
         }
         validate_json(self.answer_payload_schema, answer_payload, bundle=self.bundle)
 
         response_env = self._make_envelope(base_metadata, "response", "orchestrator", answer_payload, self.answer_payload_schema, timings_ms=timings)
         self._log_envelope("response", response_env)
+        await self._persist("response", response_env)
+
+        # Persist assistant message
+        if self.session_store and session_id and current_user_seq:
+            await self.session_store.append_message(
+                session_id=session_id, user_id=user_id, request_id=request_id, role="assistant", content=answer_text
+            )
+
         return response_env

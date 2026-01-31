@@ -25,7 +25,7 @@ class _SafeMathEvaluator(ast.NodeVisitor):
       - Operators: +, -, *, /, %, **, unary +/-
       - Parentheses via AST structure
       - Names: pi, e
-      - Calls: sqrt, abs, round, floor, ceil, min, max
+      - Calls: sqrt, abs, round, floor, ceil, min, max, factorial, comb
     Disallowed:
       - Variables (other than allowed constants)
       - Attribute access (math.sqrt)
@@ -58,6 +58,10 @@ class _SafeMathEvaluator(ast.NodeVisitor):
             "ceil": math.ceil,
             "min": min,
             "max": max,
+            # Combinatorics helpers
+            "factorial": math.factorial,
+            "fact": math.factorial,
+            "comb": math.comb,
         }
 
     def eval(self, expression: str) -> Number:
@@ -194,7 +198,7 @@ class MathEvalTool:
         description=(
             "Evaluate a pure mathematical expression deterministically and return its numeric result. "
             "Supports basic arithmetic (+, -, *, /, %, **), parentheses, constants (pi, e), and common functions "
-            "(sqrt, abs, round, floor, ceil, min, max). "
+            "(sqrt, abs, round, floor, ceil, min, max, factorial, comb). "
             "Does NOT support variables (except pi/e), strings, imports, attribute access, or any side effects."
         ),
         input_schema={

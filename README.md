@@ -140,3 +140,9 @@ python main.py
 
 - File logs use rotation configured in `logging.rotation`.
 - Container stdout logs (Docker/Podman) must also be rotated via the runtime’s log driver; file rotation does not control stdout volume.
+
+
+## Validation model
+
+- **Structural validation**: JSON Schema from `config/internal-json.json`.
+- **Semantic validation**: deterministic rules catalogued under `validator_rules.plan_validator` and enforced by `validator/validator.py`.

@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from jsonschema import Draft202012Validator
 
-from mcp_host_service.tool_types import Tool, ToolSpec
+from mcp_host_service.tool_types import Tool
 
 logger = logging.getLogger("mcp.registry")
 
@@ -25,7 +25,7 @@ class ToolRegistry:
         logger.info("tool_registered", extra={"tool": name})
 
     def list_specs(self) -> List[Dict[str, Any]]:
-        out = []
+        out: List[Dict[str, Any]] = []
         for t in self._tools.values():
             out.append(
                 {

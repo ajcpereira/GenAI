@@ -25,7 +25,7 @@ ui:
   enabled: true
 planner:
   vllm_base_url: http://127.0.0.1:8001
-  model: models/rhdeepseek
+  model: rhdeepseek
   mode: chat_completions
   api_key: EMPTY
   use_structured_outputs: true
@@ -81,6 +81,9 @@ planner:
     \ value for user_intent.locale when possible.\n- Write user_intent.summary and\
     \ all textual fields primarily in USER_LOCALE language.\n"
   default_locale: pt
+  # Some chat templates (e.g., certain DeepSeek-R1 deployments) down-weight/ignore role='system'.
+  # Setting this to 'user' makes the planner instructions deterministic across those backends.
+  system_prompt_role: user
   max_dependency_depth: 15
   retries: 2
   max_steps: 40
@@ -92,12 +95,52 @@ mcp:
   caller_id: orchestrator
 responder:
   vllm_base_url: http://127.0.0.1:8001
-  model: models/rhdeepseek
+  model: rhdeepseek
   api_key: EMPTY
   timeout_s: 20.0
   temperature: 0.2
   max_tokens: 512
   use_structured_outputs: true
+storage:
+  postgres:
+    dsn: postgresql://genai:genai123@127.0.0.1:5432/genai_db
+    pool_min: 1
+    pool_max: 5
+    connect_timeout_s: 5.0
+    statement_timeout_ms: 20000
+    # Persist only key stages to control volume. Empty list => persist all.
+    persist_stages:
+      - request
+      - planner_output
+      - validator_output
+      - executor_result
+      - final_llm_input
+      - response
+      - error
+    max_envelope_bytes: 1048576
+
+context:
+  enabled: true
+  # Context size is discovered at runtime from vLLM (/v1/models). No static max_context_tokens.
+  reserved_output_tokens: 512
+  # If omitted/0, derived as max_context_tokens - reserved_output_tokens
+  target_prompt_tokens: 0
+  # Deterministic token estimation
+  chars_per_token: 4.0
+  safety_factor: 1.2
+  # Conversation window + compaction policy
+  max_recent_messages: 20
+  keep_recent_messages: 12
+  checkpoint_max_tokens: 512
+  summarizer:
+    vllm_base_url: http://127.0.0.1:8001
+    model: rhdeepseek
+    api_key: EMPTY
+    timeout_s: 20.0
+    temperature: 0.0
+    max_tokens: 512
+    use_structured_outputs: true
+
 contracts:
   bundle_path: config/internal-json.json
 orchestrator:

@@ -1,3 +1,11 @@
+
+import os
+import sys
+
+# Allow running as a script: python mcp_host_service/main.py
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 import logging
 import time
 from typing import Any, Dict
@@ -5,8 +13,8 @@ from typing import Any, Dict
 from fastapi import FastAPI, Request, Response
 import uvicorn
 
-from mcp_host_service.registry import ToolRegistry
-from mcp_host_service.loader import load_tools
+from .registry import ToolRegistry
+from .loader import load_tools
 from mcp_host_service.api import make_mcp_router
 from mcp_host_service.logging_setup import configure_mcp_logging
 

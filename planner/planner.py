@@ -37,6 +37,12 @@ class Planner:
         self.chat_path = str(self.cfg.get("chat_path", "/v1/chat/completions"))
         self.retries = int(self.cfg.get("retries", 2))
 
+        # Some backends (notably certain DeepSeek-R1 deployments) may down-weight/ignore role='system'.
+        # Allow forcing the system prompt to be injected as 'user' for deterministic behavior.
+        self.system_prompt_role = str(self.cfg.get("system_prompt_role", "system")).strip().lower() or "system"
+        if self.system_prompt_role not in ("system", "user"):
+            self.system_prompt_role = "system"
+
         # Rules-as-config (deterministic guardrails) - sourced from config.yaml only.
         self.rules = PlannerRules(self.cfg)
         self.engine = PlannerRuleEngine(self.rules)
@@ -97,64 +103,107 @@ class Planner:
 
         catalog = "\n".join(tool_lines) if tool_lines else "(none)"
 
-        rules = (
-            "\nRules:\n"
-            "- Output MUST be a single JSON object that matches the PlannerOutput schema (no markdown, no extra keys).\n"
-            "- Top-level keys MUST be exactly: user_intent, plan, violations.\n"
-            "- Never invent capabilities.\n"
-            "- You may ONLY use capabilities that appear in the TOOL CATALOG.\n"
-            "- Default to a single 'compose' step when the user request can be answered without external data/tools.\n"
-            "- Use 'tool_call' only when a tool is clearly required.\n"
-            "- SCHEMA INVARIANT: If a step has type='tool_call', it MUST include a non-empty 'capability' string equal to one of the TOOL CATALOG names.\n"
-            "- SCHEMA INVARIANT: If a step has type='compose', set capability to null (or omit it).\n"
-            "- Do NOT output tool execution results (no fields like action/args/result). You are only planning.\n"
-            "- If tools are required but none are available, keep a single 'compose' step and set confidence low (<0.2).\n"
-            "- Set user_intent.confidence in [0,1].\n"
-            f"- Set user_intent.locale to '{locale}'.\n"
-            f"- Produce user_intent.summary and all textual fields primarily in '{locale}'.\n"
-            "- The only valid capability strings are the exact values of name in the TOOL CATALOG JSON objects."
+        no_tools_note = "\n- IMPORTANT: TOOL CATALOG is empty. You MUST NOT output any tool_call steps.\n" if catalog == "(none)" else "\n"
+
+        rule_lines = [
+            "Rules:",
+            "- Output MUST be a single JSON object that matches the PlannerOutput schema (no markdown, no extra keys).",
+            "- Top-level keys MUST be exactly: user_intent, plan, violations.",
+            "- Never invent capabilities.",
+"- You may ONLY use capabilities that appear in the TOOL CATALOG.",
+"- The plan MUST be based ONLY on the CURRENT_USER_MESSAGE. Ignore prior messages unless the user explicitly references them.",
+"- Tools are OPTIONAL. Do NOT use a tool unless it is REQUIRED to answer the CURRENT_USER_MESSAGE.",
+"- Never use tools for tasks solvable by reasoning alone (e.g., Fibonacci, combinations, code explanation).",
+"- Use math.eval ONLY to evaluate an explicit mathematical expression when it is needed; never for unrelated tasks.",
+        ]
+        if catalog == "(none)":
+            rule_lines.append("- IMPORTANT: TOOL CATALOG is empty. You MUST NOT output any tool_call steps.")
+        rule_lines.extend(
+            [
+                "- Default to a single 'compose' step when the user request can be answered without external data/tools.",
+                "- Use 'tool_call' only when a tool is clearly required.",
+                "- SCHEMA INVARIANT: If a step has type='tool_call', it MUST include a non-empty 'capability' string equal to one of the TOOL CATALOG names.",
+                "- SCHEMA INVARIANT: If a step has type='compose', set capability to null (or omit it).",
+                "- Do NOT output tool execution results (no fields like action/args/result). You are only planning.",
+                "- If tools are required but none are available, keep a single 'compose' step and set confidence low (<0.2).",
+                "- Set user_intent.confidence in [0,1].",
+                f"- Set user_intent.locale to '{locale}'.",
+                f"- Produce user_intent.summary and all textual fields primarily in '{locale}'.",
+                "- The only valid capability strings are the exact values of name in the TOOL CATALOG JSON objects.",
+            ]
         )
+        rules = "\n" + "\n".join(rule_lines) + "\n"
 
-        examples = """
+        def _example_tool_call_block() -> str:
+            """Build a tool_call example using ONLY the provided catalog.
 
-EXAMPLE OUTPUT (tool_call):
-{
-  "user_intent": {"summary": "...", "type": "informational", "confidence": 0.9, "locale": "pt"},
-  "plan": {
-    "strategy": "sequential",
-    "steps": [
-      {
-        "id": "1",
-        "type": "tool_call",
-        "capability": "time.now",
-        "description": "Obter a data e hora atuais.",
-        "inputs": {"timezone": null},
-        "dependencies": []
-      }
-    ]
-  },
-  "violations": []
-}
+            Critical: do not leak capability names when the catalog is empty.
+            """
 
-EXAMPLE OUTPUT (compose):
-{
-  "user_intent": {"summary": "...", "type": "informational", "confidence": 0.5, "locale": "pt"},
-  "plan": {
-    "strategy": "sequential",
-    "steps": [
-      {
-        "id": "compose_1",
-        "type": "compose",
-        "description": "Responder sem tools.",
-        "capability": null,
-        "inputs": {"message": "...", "locale": "pt"},
-        "dependencies": []
-      }
-    ]
-  },
-  "violations": []
-}
-"""
+            if not allowed_tools:
+                return ""
+
+            first = allowed_tools[0] or {}
+            tool_name = str(first.get("name") or "").strip()
+            schema = first.get("input_schema") or {}
+
+            # Create a minimal inputs object that satisfies required fields.
+            # If there are no required fields, an empty object is valid.
+            inputs: Dict[str, Any] = {}
+            if isinstance(schema, dict):
+                req = schema.get("required")
+                props = schema.get("properties")
+                if isinstance(req, list) and isinstance(props, dict):
+                    for k in req:
+                        if isinstance(k, str):
+                            inputs[k] = None
+
+            if not tool_name:
+                # Defensive: if the catalog entry is malformed, omit the tool_call example entirely.
+                return ""
+
+            return (
+                "\nEXAMPLE OUTPUT (tool_call):\n"
+                "{\n"
+                f"  \"user_intent\": {{\"summary\": \"...\", \"type\": \"informational\", \"confidence\": 0.9, \"locale\": \"{locale}\"}},\n"
+                "  \"plan\": {\n"
+                "    \"strategy\": \"sequential\",\n"
+                "    \"steps\": [\n"
+                "      {\n"
+                "        \"id\": \"1\",\n"
+                "        \"type\": \"tool_call\",\n"
+                f"        \"capability\": \"{tool_name}\",\n"
+                "        \"description\": \"...\",\n"
+                f"        \"inputs\": {json.dumps(inputs, ensure_ascii=False)},\n"
+                "        \"dependencies\": []\n"
+                "      }\n"
+                "    ]\n"
+                "  },\n"
+                "  \"violations\": []\n"
+                "}\n"
+            )
+
+        examples = (
+            "\nEXAMPLE OUTPUT (compose):\n"
+            "{\n"
+            f"  \"user_intent\": {{\"summary\": \"...\", \"type\": \"informational\", \"confidence\": 0.5, \"locale\": \"{locale}\"}},\n"
+            "  \"plan\": {\n"
+            "    \"strategy\": \"sequential\",\n"
+            "    \"steps\": [\n"
+            "      {\n"
+            "        \"id\": \"compose_1\",\n"
+            "        \"type\": \"compose\",\n"
+            "        \"description\": \"Responder sem tools.\",\n"
+            "        \"capability\": null,\n"
+            f"        \"inputs\": {{\"message\": \"...\", \"locale\": \"{locale}\"}},\n"
+            "        \"dependencies\": []\n"
+            "      }\n"
+            "    ]\n"
+            "  },\n"
+            "  \"violations\": []\n"
+            "}\n"
+            + _example_tool_call_block()
+        )
 
         return (
             self.base_system_prompt.rstrip()
@@ -194,22 +243,43 @@ EXAMPLE OUTPUT (compose):
         if self.planner_input_schema:
             validate_json(self.planner_input_schema, planner_input, bundle=self.bundle)
 
-        msg = str(planner_input.get("user_message") or "").strip()
+        req = planner_input.get("request") or {}
+        ctx = planner_input.get("context") or {}
+        tools = planner_input.get("tools") or {}
+        policy = tools.get("policy") or {}
+
+        msg = str(req.get("current_user_message") or "").strip()
         if not msg:
             msg = "Pedido vazio"
 
-        allowed_tools = list(planner_input.get("allowed_tools") or [])
-
-        locale = str(planner_input.get("locale") or "").strip() or self.rules.default_locale
+        locale = str(req.get("locale") or "").strip() or self.rules.default_locale
         if not locale:
             locale = detect_language(msg, default=self.rules.default_locale).code
 
+        allowed_tools = list(tools.get("catalog") or [])
+        allowed_tool_names = [
+            str(t.get("name") or "").strip()
+            for t in allowed_tools
+            if str(t.get("name") or "").strip()
+        ]
+        enabled_tool_names = list(policy.get("enabled_tools") or [])
+
+        # Build a compact user-only transcript for the planner (reduces anchoring).
+        recent_user_messages = list(ctx.get("recent_user_messages") or [])
+        transcript_lines: List[str] = []
+        for m in recent_user_messages:
+            mid = str(m.get("id") or "")
+            text = str(m.get("text") or "")
+            if text:
+                transcript_lines.append(f"[{mid}] USER: {text}")
+
+        conversation_context = "\n".join(transcript_lines).strip()
         system_prompt = self._build_system_prompt(allowed_tools, locale=locale)
         logger.debug(
             "planner_input",
             extra={
-                "enabled_tools": list(planner_input.get("enabled_tools") or []),
-                "allowed_tool_names": [str(t.get("name") or "") for t in allowed_tools],
+                "enabled_tools": enabled_tool_names,
+                "allowed_tool_names": allowed_tool_names,
                 "locale": locale,
             },
         )
@@ -218,20 +288,35 @@ EXAMPLE OUTPUT (compose):
         raw_last: str = ""
         for attempt in range(1, self.retries + 2):
             try:
-                replan_fb = str(planner_input.get("replan_feedback") or "").strip()
+                replan_fb_obj = planner_input.get("replan_feedback")
+                replan_fb = ""
+                if isinstance(replan_fb_obj, dict):
+                    reason = str(replan_fb_obj.get("reason") or "")
+                    errs = list(replan_fb_obj.get("errors") or [])
+                    err_lines: List[str] = []
+                    for e in errs:
+                        if isinstance(e, dict):
+                            code = str(e.get("code") or "")
+                            msg_e = str(e.get("message") or "")
+                            if code or msg_e:
+                                err_lines.append(f"- {code}: {msg_e}".strip())
+                    if reason or err_lines:
+                        replan_fb = "REPLAN_FEEDBACK:\n" + (f"reason: {reason}\n" if reason else "")
+                        if err_lines:
+                            replan_fb += "errors:\n" + "\n".join(err_lines) + "\n"
                 if replan_fb:
                     replan_fb = replan_fb[: self.max_replan_feedback_chars]
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                ]
+
+# System prompt role can be forced to 'user' for certain chat templates.
+                messages = [{"role": self.system_prompt_role, "content": system_prompt}]
                 if replan_fb:
-                    messages.append({"role": "system", "content": f"VALIDATION_FEEDBACK:\n{replan_fb}"})
+                    messages.append({"role": self.system_prompt_role, "content": f"VALIDATION_FEEDBACK:\n{replan_fb}"})
 
                 if last_err:
                     # Deterministic self-correction: feed previous schema/contract failure back to the model.
                     messages.append(
                         {
-                            "role": "system",
+                            "role": self.system_prompt_role,
                             "content": (
                                 "VALIDATION_FEEDBACK:\n"
                                 f"Previous attempt failed schema validation: {last_err}\n"
@@ -243,6 +328,10 @@ EXAMPLE OUTPUT (compose):
                             ),
                         }
                     )
+
+                conv_ctx = conversation_context
+                if conv_ctx:
+                    messages.append({"role": self.system_prompt_role, "content": f"CONVERSATION_CONTEXT:\n{conv_ctx}"})
 
                 messages.append({"role": "user", "content": msg})
                 raw = await self._call_vllm(messages)

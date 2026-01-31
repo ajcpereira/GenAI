@@ -32,6 +32,20 @@
 
     <div class="layout">
       <aside class="sidebar">
+
+        <div class="panel">
+          <div class="panelTitle">
+            <span>Conversas</span>
+            <button id="reloadSessionsBtn" class="btn btnSmall" title="Recarregar sessões">Refresh</button>
+          </div>
+          <div class="panelHint">Histórico persistido via API (sessions/messages).</div>
+          <div id="sessionsList" class="sessions"></div>
+          <div class="panelActions">
+            <button id="newChatBtn" class="btn btnSmall">Nova conversa</button>
+            <button id="deleteChatBtn" class="btn btnSmall btnDanger" disabled>Apagar</button>
+          </div>
+        </div>
+
         <div class="panel">
           <div class="panelTitle">
             <span>Tools</span>
@@ -67,6 +81,7 @@
     </div>
   </div>
 
-  <script src="./app.js"></script>
+  <!-- cache-bust: muda o valor quando alterares app.js -->
+  <script src="./app.js?v=20260128-1745"></script>
 </body>
 </html>
