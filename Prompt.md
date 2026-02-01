@@ -38,6 +38,7 @@ Nada deve ser alterado “porque sim”.
 
 - Não inferir tools por palavras‑chave.
 - Não “corrigir” decisões do planner fora do **replan loop**.
+- As respostas ao utilizador são na mesma lingua que ele questionou, não há linguas hardcoded
 
 ### Contratos estritos
 
